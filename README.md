@@ -21,6 +21,11 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | POST | `/api/v1/activities` | Publica una actividad (201). |
 | GET | `/api/v1/activities?limit=20&cursor=UUID` | Próximas actividades por fecha, con `items` y `next_cursor`. |
 | GET | `/api/v1/activities/{id}` | Detalle, incluido organizador público. |
+| POST | `/api/v1/activities/{id}/applications` | Postula a la actividad; la solicitud queda `pending` (201, o 200 si ya existía). |
+| GET | `/api/v1/activities/{id}/applications/me` | Estado de la postulación propia (404 si no ha postulado). |
+| GET | `/api/v1/activities/{id}/applications` | Solo el organizador: solicitudes recibidas (todas, con su estado) y la tarjeta pública de cada postulante. |
+| POST | `/api/v1/activities/{id}/applications/{application_id}/accept` | Solo el organizador: acepta y descuenta un cupo (200). |
+| POST | `/api/v1/activities/{id}/applications/{application_id}/reject` | Solo el organizador: rechaza (200). |
 
 Ejemplo del cuerpo para publicar (usar una fecha futura y un UUID nuevo por publicación):
 
@@ -31,7 +36,8 @@ Ejemplo del cuerpo para publicar (usar una fecha futura y un UUID nuevo por publ
   "sport_code": "running",
   "starts_at": "2027-01-10T19:00:00-03:00",
   "location": "Parque Bicentenario, entrada principal, Vitacura",
-  "description": "Trote recreativo de 5 km. Llevar agua."
+  "description": "Trote recreativo de 5 km. Llevar agua.",
+  "capacity": 10
 }
 ```
 
@@ -40,6 +46,30 @@ El organizador se obtiene del JWT; no se acepta un `organizer_id` enviado por el
 Fecha y hora deben incluir zona horaria y ser futuras. La app interpreta la fecha ingresada en la zona del dispositivo y envía UTC. La lista omite actividades iniciadas; su detalle sigue disponible por ID. Las actividades se ordenan por fecha e ID, con páginas de 1 a 100 registros. El cursor avanza sobre registros almacenados; una página puede tener menos resultados si algún organizador dejó de estar disponible.
 
 `client_activity_id` permite reintentar una publicación sin duplicarla. La clave es única por organizador; reutilizarla con otro contenido devuelve 409. La base serializa reintentos concurrentes.
+
+## Postulaciones
+
+El botón "Postular" de la app llama a `POST /api/v1/activities/{id}/applications` sin cuerpo; el postulante se obtiene del JWT. La solicitud queda en estado `pending` hasta que el organizador la revise. Reglas:
+
+- Una postulación por deportista y actividad (`UNIQUE` en base). Repetir la solicitud devuelve la misma postulación con 200, también ante reintentos concurrentes.
+- El organizador no puede postular a su propia actividad (409).
+- No se admiten postulaciones a actividades ya iniciadas (422) ni a actividades inexistentes o de organizadores no disponibles (404).
+- Solo el organizador puede ver las solicitudes recibidas; para otros deportistas responde 404. Los postulantes deshabilitados no aparecen en la lista.
+
+`db/migrations/002_activity_applications.sql` crea la tabla `activity_applications`.
+
+## Cupos y gestión de postulaciones
+
+`capacity` (1 a 100) es opcional al publicar; si se omite, la actividad no tiene límite de cupos. Actividad y detalle devuelven `capacity` y `available_spots` (`null` si no hay límite). Las actividades creadas antes de esta versión quedan sin límite.
+
+- El organizador acepta o rechaza cada postulación pendiente con `.../accept` o `.../reject`, sin cuerpo. Para cualquier otro deportista responde 404.
+- Aceptar descuenta un cupo. La fila de la actividad se bloquea durante la transacción, por lo que aceptaciones simultáneas nunca superan `capacity`. Sin cupos, aceptar responde 409.
+- Con la actividad llena, nuevas postulaciones responden 409; las pendientes se pueden seguir rechazando.
+- La decisión es definitiva: repetir la misma acción devuelve la postulación sin cambios (no descuenta otro cupo) y la acción contraria responde 409.
+- No se puede responder una postulación de una actividad ya iniciada (422), ni aceptar a un deportista que dejó de estar disponible (404).
+- `decided_at` registra cuándo se respondió. El deportista ve el resultado en `.../applications/me`.
+
+`db/migrations/003_activity_capacity.sql` agrega `capacity`, `accepted_count` y `decided_at` sin modificar los datos existentes.
 
 ## Ejecutar
 
@@ -73,7 +103,7 @@ Cada prueba crea y elimina exclusivamente un esquema `activities_test_<uuid>`. S
 
 ## Alcance de esta entrega
 
-Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. Inscripciones, cupos, edición, cancelación y chat grupal quedan fuera de esta primera entrega.
+Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. Edición, cancelación y chat grupal quedan fuera de esta primera entrega.
 
 ## Validación local — 6 de octubre de 2026
 

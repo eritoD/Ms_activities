@@ -156,3 +156,126 @@ def test_inactive_organizer_not_exposed(system):
     directory.active.remove(A)
     assert client.get(PREFIX, headers=headers(B)).json()['items'] == []
     assert client.get(PREFIX + '/' + created['id'], headers=headers(B)).status_code == 404
+
+
+def apply(client, activity_id, actor=B):
+    return client.post(f"{PREFIX}/{activity_id}/applications", headers=headers(actor))
+
+
+def test_athlete_applies_and_request_stays_pending_for_organizer(system):
+    client, _, _, _ = system
+    activity = publish(client)
+    response = apply(client, activity['id'])
+    assert response.status_code == 201, response.text
+    application = response.json()
+    assert application['status'] == 'pending' and application['activity_id'] == activity['id']
+    assert 'applicant_id' not in application
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B)).json() == application
+    received = client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(A)).json()
+    assert [r['id'] for r in received] == [application['id']]
+    assert received[0]['applicant']['user_id'] == str(B) and received[0]['status'] == 'pending'
+    assert set(received[0]['applicant']) == {'user_id', 'nombre', 'apellido_inicial', 'foto_perfil'}
+
+
+def test_application_retries_are_idempotent(system):
+    client, _, _, _ = system
+    activity = publish(client)
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: apply(client, activity['id']), range(4)))
+    assert {r.status_code for r in results} <= {200, 201} and [r.status_code for r in results].count(201) == 1
+    assert len({r.json()['id'] for r in results}) == 1
+    assert apply(client, activity['id']).status_code == 200
+    assert len(client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(A)).json()) == 1
+
+
+def test_application_rules(system):
+    client, repo, directory, _ = system
+    activity = publish(client)
+    assert client.post(f"{PREFIX}/{activity['id']}/applications").status_code == 401
+    assert apply(client, activity['id'], actor=A).status_code == 409
+    assert apply(client, uuid4()).status_code == 404
+    assert apply(client, 'wrong').status_code == 422
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B)).status_code == 404
+    # Only the organizer can see who applied.
+    assert apply(client, activity['id'], actor=C).status_code == 201
+    assert client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(B)).status_code == 404
+    started = publish(client)
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=CURRENT_TIMESTAMP-INTERVAL '1 hour' WHERE id=%s", (started['id'],))
+    assert apply(client, started['id']).status_code == 422
+    # Unavailable applicants are hidden from the organizer; unavailable organizers hide the activity.
+    directory.active.remove(C)
+    assert len(client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(A)).json()) == 0
+    directory.active.add(C)
+    directory.active.remove(A)
+    assert apply(client, activity['id'], actor=C).status_code == 404
+
+
+def decide(client, activity_id, application_id, action, actor=A):
+    return client.post(f"{PREFIX}/{activity_id}/applications/{application_id}/{action}", headers=headers(actor))
+
+
+def test_organizer_accepts_and_rejects_and_spots_are_discounted(system):
+    client, _, _, _ = system
+    activity = publish(client, capacity=2)
+    assert activity['capacity'] == 2 and activity['available_spots'] == 2
+    b, c = apply(client, activity['id']).json(), apply(client, activity['id'], actor=C).json()
+    accepted = decide(client, activity['id'], b['id'], 'accept')
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()['status'] == 'accepted' and accepted.json()['decided_at']
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()['available_spots'] == 1
+    assert decide(client, activity['id'], b['id'], 'accept').status_code == 200  # Retry does not take another spot.
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()['available_spots'] == 1
+    rejected = decide(client, activity['id'], c['id'], 'reject')
+    assert rejected.status_code == 200 and rejected.json()['status'] == 'rejected'
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()['available_spots'] == 1
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(C)).json()['status'] == 'rejected'
+    statuses = {r['applicant']['user_id']: r['status'] for r in
+                client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(A)).json()}
+    assert statuses == {str(B): 'accepted', str(C): 'rejected'}
+    # A decision is final.
+    assert decide(client, activity['id'], b['id'], 'reject').status_code == 409
+    assert decide(client, activity['id'], c['id'], 'accept').status_code == 409
+
+
+def test_capacity_is_never_exceeded(system):
+    client, _, directory, _ = system
+    activity = publish(client, capacity=1)
+    athletes = [uuid4() for _ in range(4)]
+    directory.active.update(athletes)
+    ids = [apply(client, activity['id'], actor=athlete).json()['id'] for athlete in athletes]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda i: decide(client, activity['id'], i, 'accept'), ids))
+    assert sorted(r.status_code for r in results) == [200, 409, 409, 409]
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()['available_spots'] == 0
+    # A full activity no longer accepts applications, but rejecting pending ones still works.
+    assert apply(client, activity['id']).status_code == 409
+    pending = [i for i, r in zip(ids, results) if r.status_code == 409]
+    assert decide(client, activity['id'], pending[0], 'reject').status_code == 200
+
+
+def test_only_organizer_decides(system):
+    client, repo, directory, _ = system
+    activity = publish(client, capacity=3)
+    application = apply(client, activity['id']).json()
+    assert client.post(f"{PREFIX}/{activity['id']}/applications/{application['id']}/accept").status_code == 401
+    assert decide(client, activity['id'], application['id'], 'accept', actor=B).status_code == 404
+    assert decide(client, activity['id'], application['id'], 'accept', actor=C).status_code == 404
+    assert decide(client, activity['id'], uuid4(), 'accept').status_code == 404
+    other = publish(client)
+    assert decide(client, other['id'], application['id'], 'accept').status_code == 404
+    assert decide(client, activity['id'], application['id'], 'maybe').status_code == 404
+    # An athlete disabled after applying cannot take a spot.
+    directory.active.remove(B)
+    assert decide(client, activity['id'], application['id'], 'accept').status_code == 404
+    directory.active.add(B)
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=CURRENT_TIMESTAMP-INTERVAL '1 hour' WHERE id=%s", (activity['id'],))
+    assert decide(client, activity['id'], application['id'], 'accept').status_code == 422
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B)).json()['status'] == 'pending'
+
+
+@pytest.mark.parametrize('capacity', [0, 101, -1, 'x'])
+def test_invalid_capacity_rejected(system, capacity):
+    client, _, _, _ = system
+    assert client.post(PREFIX, headers=headers(A), json=payload(capacity=capacity)).status_code == 422

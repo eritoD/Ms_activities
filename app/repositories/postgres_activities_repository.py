@@ -40,10 +40,10 @@ class PostgresActivitiesRepository:
             if payload.starts_at <= datetime.now(timezone.utc):
                 raise HTTPException(422, "La fecha y hora deben ser futuras.")
             self.execute(cur, """INSERT INTO activities_api.activities
-                (id, organizer_id, client_activity_id, title, sport_code, description, starts_at, location)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
+                (id, organizer_id, client_activity_id, title, sport_code, description, starts_at, location, capacity)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *""",
                 (uuid4(), actor_id, payload.client_activity_id, payload.title, payload.sport_code,
-                 payload.description, payload.starts_at, payload.location))
+                 payload.description, payload.starts_at, payload.location, payload.capacity))
             return cur.fetchone()
 
     def get(self, activity_id):
@@ -53,6 +53,87 @@ class PostgresActivitiesRepository:
             if not row:
                 raise HTTPException(404, "Actividad no disponible.")
             return row
+
+    def apply(self, activity_id, applicant_id):
+        """Returns (application, created). A repeated request returns the existing one."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, "SELECT starts_at, capacity, accepted_count FROM activities_api.activities WHERE id=%s",
+                         (activity_id,))
+            activity = cur.fetchone()
+            if not activity:
+                raise HTTPException(404, "Actividad no disponible.")
+            existing = self._application(cur, activity_id, applicant_id)
+            if existing:
+                return existing, False
+            if activity['starts_at'] <= datetime.now(timezone.utc):
+                raise HTTPException(422, "La actividad ya comenzó; no admite postulaciones.")
+            if self._full(activity):
+                raise HTTPException(409, "La actividad no tiene cupos disponibles.")
+            self.execute(cur, """INSERT INTO activities_api.activity_applications (id, activity_id, applicant_id)
+                VALUES (%s,%s,%s) ON CONFLICT (activity_id, applicant_id) DO NOTHING RETURNING *""",
+                (uuid4(), activity_id, applicant_id))
+            created = cur.fetchone()
+            # A concurrent retry may have inserted first; both callers get the same application.
+            return (created, True) if created else (self._application(cur, activity_id, applicant_id), False)
+
+    @staticmethod
+    def _full(activity):
+        return activity['capacity'] is not None and activity['accepted_count'] >= activity['capacity']
+
+    def decide(self, activity_id, organizer_id, application_id, status):
+        """Accepts or rejects a pending application; accepting takes one spot atomically."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # Lock the activity so concurrent acceptances cannot exceed its capacity.
+            self.execute(cur, "SELECT * FROM activities_api.activities WHERE id=%s FOR UPDATE", (activity_id,))
+            activity = cur.fetchone()
+            if not activity or activity['organizer_id'] != organizer_id:
+                raise HTTPException(404, "Actividad no disponible.")
+            self.execute(cur, """SELECT * FROM activities_api.activity_applications
+                WHERE id=%s AND activity_id=%s FOR UPDATE""", (application_id, activity_id))
+            application = cur.fetchone()
+            if not application:
+                raise HTTPException(404, "Postulación no disponible.")
+            if application['status'] == status:
+                return application
+            if application['status'] != 'pending':
+                raise HTTPException(409, "Esta postulación ya fue respondida.")
+            if activity['starts_at'] <= datetime.now(timezone.utc):
+                raise HTTPException(422, "La actividad ya comenzó; no se pueden responder postulaciones.")
+            if status == 'accepted':
+                if self._full(activity):
+                    raise HTTPException(409, "La actividad no tiene cupos disponibles.")
+                self.execute(cur, "UPDATE activities_api.activities SET accepted_count=accepted_count+1 WHERE id=%s",
+                             (activity_id,))
+            self.execute(cur, """UPDATE activities_api.activity_applications
+                SET status=%s, decided_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING *""", (status, application_id))
+            return cur.fetchone()
+
+    def application_by_id(self, activity_id, application_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, "SELECT * FROM activities_api.activity_applications WHERE id=%s AND activity_id=%s",
+                         (application_id, activity_id))
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "Postulación no disponible.")
+            return row
+
+    def _application(self, cur, activity_id, applicant_id):
+        self.execute(cur, "SELECT * FROM activities_api.activity_applications WHERE activity_id=%s AND applicant_id=%s",
+                     (activity_id, applicant_id))
+        return cur.fetchone()
+
+    def application(self, activity_id, applicant_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            row = self._application(cur, activity_id, applicant_id)
+            if not row:
+                raise HTTPException(404, "No has postulado a esta actividad.")
+            return row
+
+    def applications(self, activity_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, """SELECT * FROM activities_api.activity_applications WHERE activity_id=%s
+                ORDER BY created_at, id""", (activity_id,))
+            return cur.fetchall()
 
     def upcoming(self, limit, cursor):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:

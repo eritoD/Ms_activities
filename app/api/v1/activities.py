@@ -1,8 +1,8 @@
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.dependencies import get_actor, get_service
-from app.schemas.activities import Activity, ActivityCreate, ActivityPage
+from app.schemas.activities import Activity, ActivityApplication, ActivityCreate, ActivityPage, ReceivedApplication
 
 router = APIRouter(prefix="/api/v1/activities", tags=["Activities"])
 
@@ -30,3 +30,31 @@ def create(payload: ActivityCreate, actor=Depends(get_actor), service=Depends(ge
 @router.get("/{activity_id}", response_model=Activity)
 def detail(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
     return service.get(actor, activity_id)
+
+
+@router.post("/{activity_id}/applications", response_model=ActivityApplication, status_code=201)
+def apply(activity_id: UUID, response: Response, actor=Depends(get_actor), service=Depends(get_service)):
+    application, created = service.apply(actor, activity_id)
+    if not created:
+        response.status_code = 200
+    return application
+
+
+@router.get("/{activity_id}/applications/me", response_model=ActivityApplication)
+def my_application(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    return service.my_application(actor, activity_id)
+
+
+@router.get("/{activity_id}/applications", response_model=list[ReceivedApplication])
+def received_applications(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    return service.received_applications(actor, activity_id)
+
+
+@router.post("/{activity_id}/applications/{application_id}/accept", response_model=ActivityApplication)
+def accept(activity_id: UUID, application_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    return service.decide(actor, activity_id, application_id, "accepted")
+
+
+@router.post("/{activity_id}/applications/{application_id}/reject", response_model=ActivityApplication)
+def reject(activity_id: UUID, application_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    return service.decide(actor, activity_id, application_id, "rejected")
