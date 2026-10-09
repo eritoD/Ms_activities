@@ -21,6 +21,8 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | POST | `/api/v1/activities` | Publica una actividad (201). |
 | GET | `/api/v1/activities?limit=20&cursor=UUID` | Próximas actividades por fecha, con `items` y `next_cursor`. |
 | GET | `/api/v1/activities/{id}` | Detalle, incluido organizador público. |
+| PATCH | `/api/v1/activities/{id}` | Solo el organizador: modifica los campos enviados (200). |
+| DELETE | `/api/v1/activities/{id}` | Solo el organizador: elimina (cancela) la actividad (204). |
 | POST | `/api/v1/activities/{id}/applications` | Postula a la actividad; la solicitud queda `pending` (201, o 200 si ya existía). |
 | GET | `/api/v1/activities/{id}/applications/me` | Estado de la postulación propia (404 si no ha postulado). |
 | GET | `/api/v1/activities/{id}/applications` | Solo el organizador: solicitudes recibidas (todas, con su estado) y la tarjeta pública de cada postulante. |
@@ -71,6 +73,25 @@ El botón "Postular" de la app llama a `POST /api/v1/activities/{id}/application
 
 `db/migrations/003_activity_capacity.sql` agrega `capacity`, `accepted_count` y `decided_at` sin modificar los datos existentes.
 
+## Modificar y eliminar
+
+El organizador modifica con `PATCH /api/v1/activities/{id}` enviando solo lo que cambia: `title`, `sport_code`, `description`, `starts_at`, `location` y `capacity`. Cualquier otro campo, un cuerpo vacío o `null` en un campo obligatorio responden 422. `capacity: null` quita el límite de cupos.
+
+```json
+{ "title": "Running largo en el parque", "starts_at": "2027-01-10T20:00:00-03:00", "capacity": 12 }
+```
+
+`DELETE /api/v1/activities/{id}` no borra la fila: marca `cancelled_at`, para que quienes postularon sigan viendo la actividad y su estado. Reglas:
+
+- Solo el organizador; para cualquier otro deportista responde 404, igual que las postulaciones.
+- No se modifica ni elimina una actividad ya iniciada (422). La nueva fecha también debe ser futura (422).
+- Los cupos no pueden quedar por debajo de los postulantes ya aceptados (409).
+- Una actividad cancelada sale del listado, no admite modificaciones, postulaciones nuevas ni respuestas a postulaciones (409). El detalle y `.../applications/me` siguen disponibles, con `cancelled_at`.
+- Eliminar dos veces responde 204 sin cambios. La fila de la actividad se bloquea durante la operación, así que no se mezcla con aceptaciones simultáneas.
+- Detalle y listado incluyen `updated_at` (última modificación) y `cancelled_at`.
+
+`db/migrations/004_activity_edit_cancel.sql` agrega `updated_at` y `cancelled_at` sin modificar los datos existentes.
+
 ## Ejecutar
 
 Con Docker, configurar `ACTIVITIES_DATABASE_URL` y el JWT compartido en `../Ms_gateway/.env`, y ejecutar desde esa carpeta:
@@ -103,7 +124,7 @@ Cada prueba crea y elimina exclusivamente un esquema `activities_test_<uuid>`. S
 
 ## Alcance de esta entrega
 
-Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. Edición, cancelación y chat grupal quedan fuera de esta primera entrega.
+Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. La edición y la cancelación se agregaron después (ver «Modificar y eliminar»); el chat grupal sigue fuera de alcance.
 
 ## Validación local — 6 de octubre de 2026
 

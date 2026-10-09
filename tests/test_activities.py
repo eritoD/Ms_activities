@@ -279,3 +279,92 @@ def test_only_organizer_decides(system):
 def test_invalid_capacity_rejected(system, capacity):
     client, _, _, _ = system
     assert client.post(PREFIX, headers=headers(A), json=payload(capacity=capacity)).status_code == 422
+
+
+def edit(client, activity_id, actor=A, **changes):
+    return client.patch(f"{PREFIX}/{activity_id}", headers=headers(actor), json=changes)
+
+
+def remove(client, activity_id, actor=A):
+    return client.delete(f"{PREFIX}/{activity_id}", headers=headers(actor))
+
+
+def test_organizer_edits_only_the_fields_sent(system):
+    client, _, _, _ = system
+    activity = publish(client, capacity=5)
+    later = (datetime.now(timezone.utc) + timedelta(days=5)).replace(microsecond=0)
+    response = edit(client, activity['id'], title='Trote largo', starts_at=later.isoformat(), capacity=8)
+    assert response.status_code == 200, response.text
+    edited = response.json()
+    assert edited['title'] == 'Trote largo' and edited['capacity'] == 8 and edited['available_spots'] == 8
+    assert datetime.fromisoformat(edited['starts_at']) == later
+    assert edited['location'] == activity['location'] and edited['description'] == activity['description']
+    assert edited['updated_at'] and edited['cancelled_at'] is None
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json() == edited
+    # `capacity: null` removes the limit.
+    assert edit(client, activity['id'], capacity=None).json()['available_spots'] is None
+
+
+@pytest.mark.parametrize('changes', [
+    {}, {'title': None}, {'location': None}, {'starts_at': None}, {'title': '  '},
+    {'sport_code': 'Running'}, {'capacity': 0}, {'capacity': 101}, {'organizer_id': str(B)},
+    {'client_activity_id': str(uuid4())}, {'starts_at': '2020-01-01T00:00:00Z'}, {'starts_at': '2030-01-01T10:00:00'},
+])
+def test_invalid_edits_rejected(system, changes):
+    client, _, _, _ = system
+    activity = publish(client)
+    assert edit(client, activity['id'], **changes).status_code == 422
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json() == activity
+
+
+def test_only_organizer_edits_and_cancels(system):
+    client, _, _, _ = system
+    activity = publish(client)
+    assert client.patch(f"{PREFIX}/{activity['id']}", json={'title': 'Nuevo'}).status_code == 401
+    assert client.delete(f"{PREFIX}/{activity['id']}").status_code == 401
+    assert edit(client, activity['id'], actor=B, title='Ajeno').status_code == 404
+    assert remove(client, activity['id'], actor=B).status_code == 404
+    assert edit(client, uuid4(), title='Nada').status_code == 404
+    assert remove(client, uuid4()).status_code == 404
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json() == activity
+
+
+def test_capacity_cannot_drop_below_accepted(system):
+    client, _, directory, _ = system
+    activity = publish(client, capacity=3)
+    for athlete in (B, C):
+        application = apply(client, activity['id'], actor=athlete).json()
+        assert decide(client, activity['id'], application['id'], 'accept').status_code == 200
+    assert edit(client, activity['id'], capacity=1).status_code == 409
+    response = edit(client, activity['id'], capacity=2)
+    assert response.status_code == 200 and response.json()['available_spots'] == 0
+    late = uuid4()
+    directory.active.add(late)
+    assert apply(client, activity['id'], actor=late).status_code == 409
+
+
+def test_started_activity_cannot_be_edited_or_cancelled(system):
+    client, repo, _, _ = system
+    activity = publish(client)
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=CURRENT_TIMESTAMP-INTERVAL '1 hour' WHERE id=%s", (activity['id'],))
+    assert edit(client, activity['id'], title='Tarde').status_code == 422
+    assert remove(client, activity['id']).status_code == 422
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()['cancelled_at'] is None
+
+
+def test_cancelled_activity_is_hidden_and_closed_but_applicants_can_see_it(system):
+    client, _, _, _ = system
+    activity = publish(client, capacity=4)
+    pending = apply(client, activity['id']).json()
+    assert remove(client, activity['id']).status_code == 204
+    assert remove(client, activity['id']).status_code == 204  # Repeating is harmless.
+    assert client.get(PREFIX, headers=headers(C)).json()['items'] == []
+    detail = client.get(f"{PREFIX}/{activity['id']}", headers=headers(B)).json()
+    assert detail['cancelled_at'] is not None
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B)).json()['id'] == pending['id']
+    assert apply(client, activity['id'], actor=C).status_code == 409
+    assert decide(client, activity['id'], pending['id'], 'accept').status_code == 409
+    assert edit(client, activity['id'], title='Otra vez').status_code == 409
+    # Retrying an application that already existed still answers with it.
+    assert apply(client, activity['id']).status_code == 200
