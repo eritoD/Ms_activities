@@ -19,6 +19,13 @@ class ActivitiesService:
         organizer = self.users.card(row['organizer_id'], actor.token)
         return self.present(row, organizer)
 
+    def update(self, actor, activity_id, payload):
+        row = self.repository.update(activity_id, actor.id, payload.model_dump(exclude_unset=True))
+        return self.present(row, self.users.card(actor.id, actor.token))
+
+    def cancel(self, actor, activity_id):
+        self.repository.cancel(activity_id, actor.id)
+
     def apply(self, actor, activity_id):
         # get() hides activities whose organizer is no longer available.
         activity = self.get(actor, activity_id)

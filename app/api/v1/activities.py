@@ -2,7 +2,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.dependencies import get_actor, get_service
-from app.schemas.activities import Activity, ActivityApplication, ActivityCreate, ActivityPage, ReceivedApplication
+from app.schemas.activities import (
+    Activity, ActivityApplication, ActivityCreate, ActivityPage, ActivityUpdate, ReceivedApplication,
+)
 
 router = APIRouter(prefix="/api/v1/activities", tags=["Activities"])
 
@@ -30,6 +32,17 @@ def create(payload: ActivityCreate, actor=Depends(get_actor), service=Depends(ge
 @router.get("/{activity_id}", response_model=Activity)
 def detail(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
     return service.get(actor, activity_id)
+
+
+@router.patch("/{activity_id}", response_model=Activity)
+def update(activity_id: UUID, payload: ActivityUpdate, actor=Depends(get_actor), service=Depends(get_service)):
+    return service.update(actor, activity_id, payload)
+
+
+@router.delete("/{activity_id}", status_code=204)
+def cancel(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    service.cancel(actor, activity_id)
+    return Response(status_code=204)
 
 
 @router.post("/{activity_id}/applications", response_model=ActivityApplication, status_code=201)
