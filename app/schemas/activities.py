@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 from uuid import UUID
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
 
 
 class ActivityCreate(BaseModel):
@@ -13,6 +13,26 @@ class ActivityCreate(BaseModel):
     starts_at: AwareDatetime
     location: str = Field(min_length=3, max_length=200)
     capacity: int | None = Field(default=None, ge=1, le=100)
+
+
+class ActivityUpdate(BaseModel):
+    """Only the fields sent are changed. `capacity: null` removes the limit."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: str | None = Field(default=None, min_length=3, max_length=120)
+    sport_code: str | None = Field(default=None, min_length=1, max_length=50, pattern=r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+    description: str | None = Field(default=None, max_length=2000)
+    starts_at: AwareDatetime | None = None
+    location: str | None = Field(default=None, min_length=3, max_length=200)
+    capacity: int | None = Field(default=None, ge=1, le=100)
+
+    @model_validator(mode="after")
+    def requires_changes(self):
+        if not self.model_fields_set:
+            raise ValueError("Indica al menos un dato para modificar.")
+        for field in self.model_fields_set - {"capacity"}:
+            if getattr(self, field) is None:
+                raise ValueError(f"{field} no puede ser nulo.")
+        return self
 
 
 class PublicAthlete(BaseModel):
@@ -36,6 +56,8 @@ class Activity(BaseModel):
     created_at: datetime
     capacity: int | None
     available_spots: int | None
+    updated_at: datetime | None = None
+    cancelled_at: datetime | None = None
     organizer: Organizer
 
 
