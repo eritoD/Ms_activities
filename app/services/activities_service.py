@@ -39,6 +39,9 @@ class ActivitiesService:
     def my_application(self, actor, activity_id):
         return self.repository.application(activity_id, actor.id)
 
+    def withdraw(self, actor, activity_id):
+        self.repository.withdraw(activity_id, actor.id)
+
     def received_applications(self, actor, activity_id):
         # Only the organizer reviews requests; others get 404 so the list's existence is not revealed.
         if self.repository.get(activity_id)['organizer_id'] != actor.id:

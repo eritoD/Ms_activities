@@ -155,6 +155,30 @@ class PostgresActivitiesRepository:
                 SET status=%s, decided_at=CURRENT_TIMESTAMP WHERE id=%s RETURNING *""", (status, application_id))
             return cur.fetchone()
 
+    def withdraw(self, activity_id, applicant_id):
+        """The applicant cancels a pending or accepted application; an accepted one frees its spot."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # Same lock as accept/reject, so a spot is never freed and taken at the same time.
+            self.execute(cur, "SELECT * FROM activities_api.activities WHERE id=%s FOR UPDATE", (activity_id,))
+            activity = cur.fetchone()
+            if not activity:
+                raise HTTPException(404, "Actividad no disponible.")
+            self.execute(cur, """SELECT * FROM activities_api.activity_applications
+                WHERE activity_id=%s AND applicant_id=%s FOR UPDATE""", (activity_id, applicant_id))
+            application = cur.fetchone()
+            if not application:
+                raise HTTPException(404, "No has postulado a esta actividad.")
+            if application['status'] == 'rejected':
+                raise HTTPException(409, "Tu postulación fue rechazada; no se puede cancelar.")
+            if activity['cancelled_at']:
+                raise HTTPException(409, CANCELLED)
+            if activity['starts_at'] <= datetime.now(timezone.utc):
+                raise HTTPException(422, "La actividad ya comenzó; no puedes cancelar tu postulación.")
+            if application['status'] == 'accepted':
+                self.execute(cur, """UPDATE activities_api.activities SET accepted_count=accepted_count-1
+                    WHERE id=%s""", (activity_id,))
+            self.execute(cur, "DELETE FROM activities_api.activity_applications WHERE id=%s", (application['id'],))
+
     def application_by_id(self, activity_id, application_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             self.execute(cur, "SELECT * FROM activities_api.activity_applications WHERE id=%s AND activity_id=%s",

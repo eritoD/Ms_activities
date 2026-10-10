@@ -500,3 +500,50 @@ def test_reputation_shows_average_and_who_rated(system):
     directory.active.remove(C)
     reputation = client.get('/api/v1/ratings/me', headers=headers(A)).json()
     assert reputation['count'] == 2 and reputation['items'][0]['rater'] is None
+
+
+
+def withdraw(client, activity_id, actor=B):
+    return client.delete(f"{PREFIX}/{activity_id}/applications/me", headers=headers(actor))
+
+
+def test_applicant_cancels_pending_application_and_can_apply_again(system):
+    client, _, _, _ = system
+    activity = publish(client)
+    apply(client, activity['id'])
+    assert withdraw(client, activity['id']).status_code == 204
+    assert client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B)).status_code == 404
+    assert client.get(f"{PREFIX}/{activity['id']}/applications", headers=headers(A)).json() == []
+    assert withdraw(client, activity['id']).status_code == 404          # Nothing left to cancel.
+    again = apply(client, activity['id'])
+    assert again.status_code == 201 and again.json()['status'] == 'pending'
+
+
+def test_accepted_applicant_withdraws_and_frees_the_spot(system):
+    client, _, directory, _ = system
+    activity = publish(client, capacity=1)
+    application = apply(client, activity['id']).json()
+    decide(client, activity['id'], application['id'], 'accept')
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(C)).json()['available_spots'] == 0
+    assert apply(client, activity['id'], actor=C).status_code == 409    # Full.
+    assert withdraw(client, activity['id']).status_code == 204
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(C)).json()['available_spots'] == 1
+    assert apply(client, activity['id'], actor=C).status_code == 201    # The spot is free again.
+
+
+def test_who_cannot_cancel_an_application(system):
+    client, repo, _, _ = system
+    rejected = publish(client)
+    application = apply(client, rejected['id']).json()
+    decide(client, rejected['id'], application['id'], 'reject')
+    assert withdraw(client, rejected['id']).status_code == 409          # A rejection is final.
+    started = publish(client)
+    apply(client, started['id'])
+    start(repo, started['id'])
+    assert withdraw(client, started['id']).status_code == 422
+    cancelled = publish(client)
+    apply(client, cancelled['id'])
+    remove(client, cancelled['id'])
+    assert withdraw(client, cancelled['id']).status_code == 409
+    assert withdraw(client, uuid4()).status_code == 404
+    assert client.delete(f"{PREFIX}/{started['id']}/applications/me").status_code == 401

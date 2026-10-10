@@ -30,6 +30,7 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | GET | `/api/v1/ratings/given` | Las calificaciones que diste. |
 | POST | `/api/v1/activities/{id}/applications` | Postula a la actividad; la solicitud queda `pending` (201, o 200 si ya existía). |
 | GET | `/api/v1/activities/{id}/applications/me` | Estado de la postulación propia (404 si no ha postulado). |
+| DELETE | `/api/v1/activities/{id}/applications/me` | Cancela tu postulación; si estaba aceptada, libera el cupo (204). |
 | GET | `/api/v1/activities/{id}/applications` | Solo el organizador: solicitudes recibidas (todas, con su estado) y la tarjeta pública de cada postulante. |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/accept` | Solo el organizador: acepta y descuenta un cupo (200). |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/reject` | Solo el organizador: rechaza (200). |
@@ -74,6 +75,7 @@ El botón "Postular" de la app llama a `POST /api/v1/activities/{id}/application
 - Con la actividad llena, nuevas postulaciones responden 409; las pendientes se pueden seguir rechazando.
 - La decisión es definitiva: repetir la misma acción devuelve la postulación sin cambios (no descuenta otro cupo) y la acción contraria responde 409.
 - No se puede responder una postulación de una actividad ya iniciada (422), ni aceptar a un deportista que dejó de estar disponible (404).
+- Quien postuló puede cancelar con `DELETE .../applications/me` mientras esté pendiente o aceptada: la postulación se elimina y, si estaba aceptada, el cupo vuelve a quedar libre (bloqueando la actividad, igual que al aceptar). Después puede volver a postular. Una postulación rechazada no se cancela (409), ni se cancela en una actividad iniciada (422) o cancelada (409).
 - `decided_at` registra cuándo se respondió. El deportista ve el resultado en `.../applications/me`.
 
 `db/migrations/003_activity_capacity.sql` agrega `capacity`, `accepted_count` y `decided_at` sin modificar los datos existentes.

@@ -70,6 +70,12 @@ def my_application(activity_id: UUID, actor=Depends(get_actor), service=Depends(
     return service.my_application(actor, activity_id)
 
 
+@router.delete("/{activity_id}/applications/me", status_code=204)
+def withdraw(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    service.withdraw(actor, activity_id)
+    return Response(status_code=204)
+
+
 @router.get("/{activity_id}/applications", response_model=list[ReceivedApplication])
 def received_applications(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
     return service.received_applications(actor, activity_id)
