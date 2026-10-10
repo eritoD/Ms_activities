@@ -77,3 +77,45 @@ class ActivityApplication(BaseModel):
 class ReceivedApplication(ActivityApplication):
     applicant: PublicAthlete
 
+
+
+class HistoryActivity(Activity):
+    role: Literal["organizer", "participant"]
+
+
+class ActivityHistory(BaseModel):
+    count: int
+    items: list[HistoryActivity]
+
+
+class Participant(PublicAthlete):
+    role: Literal["organizer", "participant"]
+
+
+class RatingInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    score: int = Field(ge=1, le=5)
+    comment: str | None = Field(default=None, max_length=300)
+
+
+class GivenRating(BaseModel):
+    rated_user_id: UUID
+    score: int
+    comment: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class ReceivedRating(BaseModel):
+    id: UUID
+    score: int
+    comment: str
+    created_at: datetime
+    updated_at: datetime
+    rater: PublicAthlete | None
+
+
+class Reputation(BaseModel):
+    average: float | None
+    count: int
+    items: list[ReceivedRating]

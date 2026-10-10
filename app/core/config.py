@@ -9,6 +9,7 @@ class Settings:
     users_url: str
     issuer: str
     audience: str
+    matching_url: str = "http://ms_matching:8002"
 
 
 def get_settings() -> Settings:
@@ -20,4 +21,5 @@ def get_settings() -> Settings:
         users_url=os.environ.get("USERS_SERVICE_URL", "http://ms_users:8001"),
         issuer=os.environ.get("JWT_ISSUER", "sportmatch-auth"),
         audience=os.environ.get("JWT_AUDIENCE", "sportmatch-mobile"),
+        matching_url=os.environ.get("MATCHING_SERVICE_URL", "http://ms_matching:8002"),
     )

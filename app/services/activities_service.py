@@ -1,9 +1,12 @@
 from fastapi import HTTPException
 
 
+NOT_RATEABLE = "Solo puedes calificar a deportistas con quienes hiciste match o compartiste una actividad ya realizada."
+
+
 class ActivitiesService:
-    def __init__(self, repository, users):
-        self.repository, self.users = repository, users
+    def __init__(self, repository, users, matching=None):
+        self.repository, self.users, self.matching = repository, users, matching
 
     def present(self, row, organizer):
         # Response schemas expose only the public card, never email, RUT or private location.
@@ -57,3 +60,46 @@ class ActivitiesService:
         organizers = self.users.cards(list({row['organizer_id'] for row in rows}), actor.token)
         return {"items": [self.present(row, organizers[row['organizer_id']]) for row in rows
                           if row['organizer_id'] in organizers], "next_cursor": next_cursor}
+
+    # ---------- history ----------
+    def history(self, actor, limit):
+        rows, total = self.repository.history(actor.id, limit)
+        organizers = self.users.cards(list({row['organizer_id'] for row in rows}), actor.token)
+        return {"count": total, "items": [{**self.present(row, organizers[row['organizer_id']]), "role": row['role']}
+                                          for row in rows if row['organizer_id'] in organizers]}
+
+    def participants(self, actor, activity_id):
+        """Who took part, for the organizer and accepted participants only (others get 404)."""
+        members = self.repository.participants(activity_id)
+        if not members:
+            raise HTTPException(404, "Actividad no disponible.")
+        if actor.id not in {member['user_id'] for member in members}:
+            raise HTTPException(404, "Actividad no disponible.")
+        others = [member for member in members if member['user_id'] != actor.id]
+        cards = self.users.cards([member['user_id'] for member in others], actor.token)
+        return [{**cards[member['user_id']], "role": member['role']} for member in others
+                if member['user_id'] in cards]
+
+    # ---------- ratings ----------
+    def rate(self, actor, rated_id, payload):
+        if rated_id == actor.id:
+            raise HTTPException(422, "No puedes calificarte a ti mismo.")
+        # Only active athletes can be rated; an unavailable one answers 404.
+        self.users.card(rated_id, actor.token)
+        # The local check is cheap, so Matching is only asked when there is no shared activity.
+        shared = self.repository.shared_past_activity(actor.id, rated_id)
+        if not shared and not (self.matching and self.matching.matched_with(rated_id, actor.token)):
+            raise HTTPException(403, NOT_RATEABLE)
+        row = self.repository.rate(actor.id, rated_id, payload.score, payload.comment or "")
+        return {**row, "rated_user_id": row['rated_id']}
+
+    def given(self, actor):
+        return [{**row, "rated_user_id": row['rated_id']} for row in self.repository.given_ratings(actor.id)]
+
+    def reputation(self, actor):
+        rows = self.repository.received_ratings(actor.id)
+        raters = self.users.cards(list({row['rater_id'] for row in rows}), actor.token)
+        average = round(sum(row['score'] for row in rows) / len(rows), 2) if rows else None
+        # The score of a rater who is no longer active still counts; their card is just not shown.
+        return {"average": average, "count": len(rows),
+                "items": [{**row, "rater": raters.get(row['rater_id'])} for row in rows]}

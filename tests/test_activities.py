@@ -34,6 +34,12 @@ def headers(user_id):
 class Directory:
     def __init__(self):
         self.active = {A, B, C}
+        # Accepted matches, as Ms_Matching would report them for the athlete in the token.
+        self.matches = set()
+
+    def matched_with(self, user_id, token):
+        me = UUID(jwt.decode(token, options={"verify_signature": False})["sub"])
+        return frozenset({me, user_id}) in self.matches
 
     def card(self, user_id, _token):
         if user_id not in self.active:
@@ -55,7 +61,7 @@ def system():
     repository = PostgresActivitiesRepository(pool, schema=schema)
     repository.migrate()
     directory = Directory()
-    service = ActivitiesService(repository, directory)
+    service = ActivitiesService(repository, directory, directory)
     settings = Settings(url, SECRET, "http://users.test", "sportmatch-auth", "sportmatch-mobile")
     try:
         with TestClient(create_app(service, settings)) as client:
@@ -368,3 +374,129 @@ def test_cancelled_activity_is_hidden_and_closed_but_applicants_can_see_it(syste
     assert edit(client, activity['id'], title='Otra vez').status_code == 409
     # Retrying an application that already existed still answers with it.
     assert apply(client, activity['id']).status_code == 200
+
+
+
+def start(repo, activity_id, hours=1):
+    """Moves an activity to the past, as if it had already happened."""
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=CURRENT_TIMESTAMP-%s*INTERVAL '1 hour' WHERE id=%s",
+                     (hours, activity_id))
+
+
+def held_activity(client, repo, *accepted, capacity=5):
+    """An activity organized by A, with the given athletes accepted, that already happened."""
+    activity = publish(client, capacity=capacity)
+    for athlete in accepted:
+        application = apply(client, activity['id'], actor=athlete).json()
+        assert decide(client, activity['id'], application['id'], 'accept').status_code == 200
+    start(repo, activity['id'])
+    return activity
+
+
+def rate(client, rated, actor=A, **body):
+    return client.put(f"/api/v1/ratings/{rated}", headers=headers(actor), json={'score': 5, **body})
+
+
+def test_history_lists_only_held_activities_where_you_took_part(system):
+    client, repo, _, _ = system
+    held = held_activity(client, repo, B)
+    pending = publish(client)
+    apply(client, pending['id'], actor=B)
+    start(repo, pending['id'], hours=2)              # B applied but was never accepted.
+    cancelled = publish(client)
+    assert remove(client, cancelled['id']).status_code == 204
+    future = publish(client)                          # Not held yet.
+    organizer = client.get(PREFIX + '/history', headers=headers(A)).json()
+    assert [(a['id'], a['role']) for a in organizer['items']] == [(held['id'], 'organizer'), (pending['id'], 'organizer')]
+    assert organizer['count'] == 2 and future['id'] not in {a['id'] for a in organizer['items']}
+    participant = client.get(PREFIX + '/history', headers=headers(B)).json()
+    assert participant['count'] == 1 and participant['items'][0]['role'] == 'participant'
+    assert participant['items'][0]['organizer']['user_id'] == str(A)
+    assert client.get(PREFIX + '/history', headers=headers(C)).json() == {'count': 0, 'items': []}
+    assert client.get(PREFIX + '/history').status_code == 401
+
+
+def test_participants_visible_only_to_members(system):
+    client, repo, directory, _ = system
+    activity = held_activity(client, repo, B, C)
+    seen_by_b = client.get(f"{PREFIX}/{activity['id']}/participants", headers=headers(B)).json()
+    assert {(p['user_id'], p['role']) for p in seen_by_b} == {(str(A), 'organizer'), (str(C), 'participant')}
+    assert set(seen_by_b[0]) == {'user_id', 'nombre', 'apellido_inicial', 'foto_perfil', 'role'}
+    outsider = uuid4()
+    directory.active.add(outsider)
+    assert client.get(f"{PREFIX}/{activity['id']}/participants", headers=headers(outsider)).status_code == 404
+    assert client.get(f"{PREFIX}/{uuid4()}/participants", headers=headers(A)).status_code == 404
+
+
+def test_rate_after_shared_activity_and_update_it(system):
+    client, repo, _, _ = system
+    held_activity(client, repo, B, C)
+    first = rate(client, B, score=4, comment='  Muy puntual  ')
+    assert first.status_code == 200, first.text
+    assert first.json()['score'] == 4 and first.json()['comment'] == 'Muy puntual'
+    assert rate(client, A, actor=C, score=2).status_code == 200      # Participant rates the organizer.
+    assert rate(client, C, actor=B, score=3).status_code == 200      # Two accepted participants.
+    again = rate(client, B, score=5)
+    assert again.status_code == 200 and again.json()['score'] == 5 and again.json()['comment'] == ''
+    given = client.get('/api/v1/ratings/given', headers=headers(A)).json()
+    assert [(g['rated_user_id'], g['score']) for g in given] == [(str(B), 5)]
+
+
+def test_rate_after_match(system):
+    client, _, directory, _ = system
+    assert rate(client, B).status_code == 403
+    directory.matches.add(frozenset({A, B}))
+    assert rate(client, B, score=3, comment='Buen compañero').status_code == 200
+
+
+def test_who_cannot_be_rated(system):
+    client, repo, _, _ = system
+    upcoming = publish(client)
+    application = apply(client, upcoming['id']).json()
+    decide(client, upcoming['id'], application['id'], 'accept')
+    assert rate(client, B).status_code == 403                         # The activity has not happened yet.
+    pending = publish(client)
+    apply(client, pending['id'], actor=C)
+    start(repo, pending['id'])
+    assert rate(client, C).status_code == 403                         # Applied but was never accepted.
+    assert rate(client, A).status_code == 422                        # Nobody rates themselves.
+    assert rate(client, uuid4()).status_code == 404                   # Unknown or disabled athlete.
+    assert client.put(f"/api/v1/ratings/{B}", json={'score': 5}).status_code == 401
+
+
+def test_cancelled_activity_does_not_allow_ratings(system):
+    client, repo, _, _ = system
+    activity = held_activity(client, repo, B)
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET cancelled_at=CURRENT_TIMESTAMP WHERE id=%s",
+                     (activity['id'],))
+    assert rate(client, B).status_code == 403
+    assert client.get(PREFIX + '/history', headers=headers(B)).json()['count'] == 0
+
+
+@pytest.mark.parametrize('body', [{'score': 0}, {'score': 6}, {'score': 'x'}, {'comment': 'Sin puntaje'},
+                                  {'score': 3, 'comment': 'x' * 301}, {'score': 3, 'rater_id': str(B)}])
+def test_invalid_ratings_rejected(system, body):
+    client, repo, _, _ = system
+    held_activity(client, repo, B)
+    assert client.put(f"/api/v1/ratings/{B}", headers=headers(A), json=body).status_code == 422
+
+
+def test_reputation_shows_average_and_who_rated(system):
+    client, repo, directory, _ = system
+    held_activity(client, repo, B, C)
+    assert client.get('/api/v1/ratings/me', headers=headers(A)).json() == {'average': None, 'count': 0, 'items': []}
+    rate(client, A, actor=B, score=5, comment='Excelente organización')
+    rate(client, A, actor=C, score=4)
+    reputation = client.get('/api/v1/ratings/me', headers=headers(A)).json()
+    assert reputation['average'] == 4.5 and reputation['count'] == 2
+    assert [(r['rater']['user_id'], r['score'], r['comment']) for r in reputation['items']] == [
+        (str(C), 4, ''), (str(B), 5, 'Excelente organización')]
+    assert set(reputation['items'][0]['rater']) == {'user_id', 'nombre', 'apellido_inicial', 'foto_perfil'}
+    # Ratings are private to the rated athlete: B only sees what B received.
+    assert client.get('/api/v1/ratings/me', headers=headers(B)).json()['count'] == 0
+    # A rater disabled later still counts, but is no longer shown.
+    directory.active.remove(C)
+    reputation = client.get('/api/v1/ratings/me', headers=headers(A)).json()
+    assert reputation['count'] == 2 and reputation['items'][0]['rater'] is None

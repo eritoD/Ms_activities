@@ -197,3 +197,66 @@ class PostgresActivitiesRepository:
                  boundary['id'] if boundary else None, limit + 1))
             rows = cur.fetchall()
             return rows[:limit], rows[limit - 1]['id'] if len(rows) > limit else None
+
+    # ---------- history and ratings ----------
+    # Who took part in an activity that already happened: the organizer and every accepted applicant.
+    # Cancelled activities never count.
+    _MEMBERS = """SELECT a.id AS activity_id, a.organizer_id AS user_id, 'organizer' AS role
+            FROM activities_api.activities a
+            WHERE a.cancelled_at IS NULL AND a.starts_at <= CURRENT_TIMESTAMP
+        UNION ALL
+        SELECT a.id, p.applicant_id, 'participant'
+            FROM activities_api.activities a
+            JOIN activities_api.activity_applications p ON p.activity_id = a.id AND p.status = 'accepted'
+            WHERE a.cancelled_at IS NULL AND a.starts_at <= CURRENT_TIMESTAMP"""
+
+    def history(self, user_id, limit):
+        """Activities already held where the athlete organized or was accepted, newest first."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, f"""WITH members AS ({self._MEMBERS})
+                SELECT a.*, m.role, count(*) OVER () AS total
+                FROM members m JOIN activities_api.activities a ON a.id = m.activity_id
+                WHERE m.user_id = %s ORDER BY a.starts_at DESC, a.id LIMIT %s""", (user_id, limit))
+            rows = cur.fetchall()
+            if rows:
+                return rows, rows[0]['total']
+            return [], 0
+
+    def participants(self, activity_id):
+        """Organizer and accepted applicants of an activity, whether or not it already happened."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, """SELECT organizer_id AS user_id, 'organizer' AS role FROM activities_api.activities
+                WHERE id=%s
+                UNION ALL
+                SELECT applicant_id, 'participant' FROM activities_api.activity_applications
+                WHERE activity_id=%s AND status='accepted'""", (activity_id, activity_id))
+            return cur.fetchall()
+
+    def shared_past_activity(self, user_id, other_id):
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, f"""WITH members AS ({self._MEMBERS})
+                SELECT EXISTS (SELECT 1 FROM members x JOIN members y ON x.activity_id = y.activity_id
+                               WHERE x.user_id = %s AND y.user_id = %s)""", (user_id, other_id))
+            return cur.fetchone()[0]
+
+    def rate(self, rater_id, rated_id, score, comment):
+        """One rating per pair of athletes; rating again replaces the previous score and comment."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, """INSERT INTO activities_api.ratings (id, rater_id, rated_id, score, comment)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (rater_id, rated_id) DO UPDATE
+                SET score=EXCLUDED.score, comment=EXCLUDED.comment, updated_at=CURRENT_TIMESTAMP
+                RETURNING *""", (uuid4(), rater_id, rated_id, score, comment))
+            return cur.fetchone()
+
+    def received_ratings(self, user_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, """SELECT * FROM activities_api.ratings WHERE rated_id=%s
+                ORDER BY updated_at DESC, id""", (user_id,))
+            return cur.fetchall()
+
+    def given_ratings(self, user_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, """SELECT * FROM activities_api.ratings WHERE rater_id=%s
+                ORDER BY updated_at DESC, id""", (user_id,))
+            return cur.fetchall()
