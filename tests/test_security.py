@@ -8,6 +8,7 @@ from fastapi import HTTPException
 
 from app.core.config import Settings
 from app.core.security import authenticate
+from app.services.matching_client import MatchingClient
 from app.services.users_client import UsersClient
 
 SECRET = 'activities-test-secret-longer-than-thirty-two-bytes'
@@ -40,3 +41,36 @@ def test_users_validation_fails_closed(status):
             users.card(uuid4(), 'actor-token')
         assert error.value.status_code == (503 if status == 500 else status)
         assert requests[0].headers['authorization'] == 'Bearer actor-token'
+
+
+def test_matching_client_forwards_the_athlete_token_and_reads_accepted_matches():
+    me, friend, stranger = uuid4(), uuid4(), uuid4()
+    requests = []
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={'incoming': [], 'outgoing': [], 'hidden_user_ids': [], 'matches': [
+            {'sender_id': str(friend), 'recipient_id': str(me)}]})
+    with httpx.Client(base_url='http://matching.test', transport=httpx.MockTransport(handler)) as client:
+        matching = MatchingClient(client)
+        assert matching.matched_with(friend, 'actor-token') is True
+        assert matching.matched_with(stranger, 'actor-token') is False
+    assert requests[0].url.path == '/api/v1/matching/state'
+    assert requests[0].headers['authorization'] == 'Bearer actor-token'
+
+
+@pytest.mark.parametrize('status, expected', [(401, 401), (404, 404), (500, 503)])
+def test_matching_client_fails_closed(status, expected):
+    with httpx.Client(base_url='http://matching.test',
+                      transport=httpx.MockTransport(lambda _: httpx.Response(status))) as client:
+        with pytest.raises(HTTPException) as error:
+            MatchingClient(client).matched_with(uuid4(), 'actor-token')
+    assert error.value.status_code == expected
+
+
+def test_matching_client_offline_returns_503():
+    def offline(request):
+        raise httpx.ConnectError('offline', request=request)
+    with httpx.Client(base_url='http://matching.test', transport=httpx.MockTransport(offline)) as client:
+        with pytest.raises(HTTPException) as error:
+            MatchingClient(client).matched_with(uuid4(), 'actor-token')
+    assert error.value.status_code == 503

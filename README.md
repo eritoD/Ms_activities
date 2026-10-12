@@ -23,8 +23,14 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | GET | `/api/v1/activities/{id}` | Detalle, incluido organizador público. |
 | PATCH | `/api/v1/activities/{id}` | Solo el organizador: modifica los campos enviados (200). |
 | DELETE | `/api/v1/activities/{id}` | Solo el organizador: elimina (cancela) la actividad (204). |
+| GET | `/api/v1/activities/history?limit=50` | Actividades ya realizadas donde organizaste o fuiste aceptado, con `role` y `count`. |
+| GET | `/api/v1/activities/{id}/participants` | Solo organizador y aceptados: quiénes más estuvieron, con su rol. |
+| PUT | `/api/v1/ratings/{user_id}` | Califica a un deportista (1 a 5, comentario opcional); repetir actualiza. |
+| GET | `/api/v1/ratings/me` | Tu reputación: promedio, cantidad y calificaciones recibidas. |
+| GET | `/api/v1/ratings/given` | Las calificaciones que diste. |
 | POST | `/api/v1/activities/{id}/applications` | Postula a la actividad; la solicitud queda `pending` (201, o 200 si ya existía). |
 | GET | `/api/v1/activities/{id}/applications/me` | Estado de la postulación propia (404 si no ha postulado). |
+| DELETE | `/api/v1/activities/{id}/applications/me` | Cancela tu postulación; si estaba aceptada, libera el cupo (204). |
 | GET | `/api/v1/activities/{id}/applications` | Solo el organizador: solicitudes recibidas (todas, con su estado) y la tarjeta pública de cada postulante. |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/accept` | Solo el organizador: acepta y descuenta un cupo (200). |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/reject` | Solo el organizador: rechaza (200). |
@@ -69,6 +75,7 @@ El botón "Postular" de la app llama a `POST /api/v1/activities/{id}/application
 - Con la actividad llena, nuevas postulaciones responden 409; las pendientes se pueden seguir rechazando.
 - La decisión es definitiva: repetir la misma acción devuelve la postulación sin cambios (no descuenta otro cupo) y la acción contraria responde 409.
 - No se puede responder una postulación de una actividad ya iniciada (422), ni aceptar a un deportista que dejó de estar disponible (404).
+- Quien postuló puede cancelar con `DELETE .../applications/me` mientras esté pendiente o aceptada: la postulación se elimina y, si estaba aceptada, el cupo vuelve a quedar libre (bloqueando la actividad, igual que al aceptar). Después puede volver a postular. Una postulación rechazada no se cancela (409), ni se cancela en una actividad iniciada (422) o cancelada (409).
 - `decided_at` registra cuándo se respondió. El deportista ve el resultado en `.../applications/me`.
 
 `db/migrations/003_activity_capacity.sql` agrega `capacity`, `accepted_count` y `decided_at` sin modificar los datos existentes.
@@ -91,6 +98,20 @@ El organizador modifica con `PATCH /api/v1/activities/{id}` enviando solo lo que
 - Detalle y listado incluyen `updated_at` (última modificación) y `cancelled_at`.
 
 `db/migrations/004_activity_edit_cancel.sql` agrega `updated_at` y `cancelled_at` sin modificar los datos existentes.
+
+## Historial y calificaciones
+
+Una actividad cuenta como **realizada** cuando ya pasó su fecha de inicio y no fue cancelada. Participaron quien la organizó y los postulantes aceptados. `GET /activities/history` las devuelve de la más reciente a la más antigua, con `role` (`organizer` o `participant`) y `count` (total, que la app muestra como «Entrenamientos»).
+
+`PUT /api/v1/ratings/{user_id}` recibe `{"score": 1-5, "comment": "opcional, hasta 300"}`. Reglas:
+
+- Solo se califica a quien **compartió contigo una actividad realizada** (ambos organizador o aceptados en la misma) **o tiene un match aceptado contigo**. Si no, 403.
+- El match se consulta a Ms_Matching (`GET /api/v1/matching/state`) con el mismo token del deportista; Activities no lee la base de Matching. Por eso `MATCHING_SERVICE_URL` es obligatorio en Compose.
+- Una calificación por par de deportistas; volver a calificar reemplaza puntaje y comentario. No puedes calificarte (422) ni calificar a una cuenta deshabilitada (404).
+- `GET /ratings/me` solo muestra lo que **tú** recibiste: promedio (2 decimales), cantidad y, por cada una, la tarjeta pública de quien calificó. Si esa cuenta se deshabilitó, su puntaje sigue contando pero `rater` es `null`.
+- `GET /activities/{id}/participants` responde 404 a quien no estuvo en la actividad.
+
+`db/migrations/005_ratings.sql` crea `activities_api.ratings` y un índice para buscar postulaciones por deportista.
 
 ## Ejecutar
 
