@@ -547,3 +547,28 @@ def test_who_cannot_cancel_an_application(system):
     assert withdraw(client, cancelled['id']).status_code == 409
     assert withdraw(client, uuid4()).status_code == 404
     assert client.delete(f"{PREFIX}/{started['id']}/applications/me").status_code == 401
+
+
+def outbox(repo):
+    with repo.pool.connection() as conn, conn.cursor() as cur:
+        repo.execute(cur, "SELECT user_id, title, body FROM activities_api.notification_outbox ORDER BY id")
+        return [(str(user_id), title, body) for user_id, title, body in cur.fetchall()]
+
+
+def test_organizer_is_notified_when_someone_withdraws(system):
+    client, repo, _, _ = system
+    activity = publish(client, title='Trote')
+    apply(client, activity['id'])
+    withdraw(client, activity['id'])
+    application = apply(client, activity['id']).json()
+    decide(client, activity['id'], application['id'], 'accept')
+    withdraw(client, activity['id'])
+    assert [event for event in outbox(repo) if event[1] == 'Cancelaron una postulación'] == [
+        (str(A), 'Cancelaron una postulación', 'Una persona retiró su postulación a Trote.'),
+        (str(A), 'Cancelaron una postulación', 'Un participante se retiró de Trote. Se liberó un cupo.')]
+    # Deleting an activity outright (only cleanup does this) cascades silently.
+    apply(client, activity['id'], actor=C)
+    before = len(outbox(repo))
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "DELETE FROM activities_api.activities WHERE id=%s", (activity['id'],))
+    assert len(outbox(repo)) == before
