@@ -37,11 +37,15 @@ class FakeRepository:
     def chat_activity(self, activity_id, user_id):
         return self.activity
 
-    def messages(self, *args):
-        return self.rows
+    def chat_page(self, activity_id, user_id, after_id, before_id, limit, check):
+        check(self.activity)
+        return self.activity, False, self.rows
 
-    def chat_muted(self, *args):
-        return False
+
+class EmptyRepository(FakeRepository):
+    def chat_page(self, activity_id, user_id, after_id, before_id, limit, check):
+        check(self.activity)
+        return self.activity, False, []
 
 
 class CountingUsers:
@@ -63,6 +67,13 @@ def test_author_cards_are_fetched_once_per_request():
     assert users.calls == [{A, B}]
     assert [m['own'] for m in page['mensajes']] == [True, False, True, False, True]
     assert page['acceso'] == 'escribir' and page['mensajes'][0]['author_name'] == 'Ana P.'
+
+
+def test_a_poll_without_new_messages_does_not_call_ms_users():
+    # The open chat polls every few seconds; an empty poll must stay cheap.
+    users = CountingUsers()
+    page = ActivitiesService(EmptyRepository(), users).chat_messages(Actor, uuid4(), 5, None, 50)
+    assert users.calls == [] and page['mensajes'] == []
 
 
 @pytest.mark.parametrize('activity', [{'member': False}, {'cancelled': True}])

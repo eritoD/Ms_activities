@@ -137,12 +137,10 @@ class ActivitiesService:
                 for row in rows]
 
     def chat_messages(self, actor, activity_id, after_id, before_id, limit):
-        activity = self.repository.chat_activity(activity_id, actor.id)
-        access = self._chat_access(activity)
-        rows = self.repository.messages(activity_id, after_id, before_id, limit)
-        return {"acceso": access, "participantes": activity['participants'],
-                "silenciado": self.repository.chat_muted(activity_id, actor.id),
-                "mensajes": self._present_messages(actor, rows)}
+        activity, muted, rows = self.repository.chat_page(activity_id, actor.id, after_id, before_id, limit,
+                                                          self._chat_access)
+        return {"acceso": self._chat_access(activity), "participantes": activity['participants'],
+                "silenciado": muted, "mensajes": self._present_messages(actor, rows)}
 
     def post_message(self, actor, activity_id, payload):
         def check(activity, existing):
