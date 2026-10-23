@@ -3,8 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.dependencies import get_actor, get_service
 from app.schemas.activities import (
-    Activity, ActivityApplication, ActivityCreate, ActivityHistory, ActivityPage, ActivityUpdate, GivenRating,
-    Participant, RatingInput, ReceivedApplication, Reputation,
+    Activity, ActivityApplication, ActivityCreate, ActivityHistory, ActivityPage, ActivityUpdate, ChatMuteInput,
+    ChatReadInput, GivenRating, GroupChat, GroupChatMessages, GroupMessage, GroupMessageInput, MAX_ID, Participant,
+    RatingInput, ReceivedApplication, Reputation,
 )
 
 router = APIRouter(prefix="/api/v1/activities", tags=["Activities"])
@@ -34,6 +35,37 @@ def create(payload: ActivityCreate, actor=Depends(get_actor), service=Depends(ge
 @router.get("/history", response_model=ActivityHistory)
 def history(limit: int = Query(50, ge=1, le=100), actor=Depends(get_actor), service=Depends(get_service)):
     return service.history(actor, limit)
+
+
+# Also before "/{activity_id}", for the same reason.
+@router.get("/chats", response_model=list[GroupChat])
+def chats(actor=Depends(get_actor), service=Depends(get_service)):
+    return service.chats(actor)
+
+
+@router.get("/{activity_id}/chat/messages", response_model=GroupChatMessages)
+def chat_messages(activity_id: UUID, after_id: int | None = Query(None, ge=0, le=MAX_ID),
+                  before_id: int | None = Query(None, ge=1, le=MAX_ID),
+                  limit: int = Query(50, ge=1, le=100), actor=Depends(get_actor), service=Depends(get_service)):
+    return service.chat_messages(actor, activity_id, after_id, before_id, limit)
+
+
+@router.post("/{activity_id}/chat/messages", response_model=GroupMessage, status_code=201)
+def post_chat_message(activity_id: UUID, payload: GroupMessageInput, actor=Depends(get_actor),
+                      service=Depends(get_service)):
+    return service.post_message(actor, activity_id, payload)
+
+
+@router.post("/{activity_id}/chat/read", status_code=204)
+def read_chat(activity_id: UUID, payload: ChatReadInput, actor=Depends(get_actor), service=Depends(get_service)):
+    service.mark_chat_read(actor, activity_id, payload.last_read_id)
+    return Response(status_code=204)
+
+
+@router.put("/{activity_id}/chat/mute", status_code=204)
+def mute_chat(activity_id: UUID, payload: ChatMuteInput, actor=Depends(get_actor), service=Depends(get_service)):
+    service.mute_chat(actor, activity_id, payload.muted)
+    return Response(status_code=204)
 
 
 @router.get("/{activity_id}/participants", response_model=list[Participant])

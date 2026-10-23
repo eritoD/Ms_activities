@@ -119,3 +119,52 @@ class Reputation(BaseModel):
     average: float | None
     count: int
     items: list[ReceivedRating]
+
+
+# ---------- group chat (HU-50) ----------
+MAX_ID = 2 ** 63 - 1  # bigint; larger values would fail in PostgreSQL instead of answering 422.
+
+
+class GroupMessageInput(BaseModel):
+    """The author always comes from the JWT; any other field is rejected."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    text: str = Field(min_length=1, max_length=1000)
+    client_message_id: UUID
+
+
+class GroupMessage(BaseModel):
+    id: int
+    author_id: UUID
+    author_name: str
+    text: str
+    created_at: datetime
+    own: bool
+
+
+class GroupChatMessages(BaseModel):
+    acceso: Literal["escribir", "leer"]
+    participantes: int
+    silenciado: bool
+    mensajes: list[GroupMessage]
+
+
+class GroupChat(BaseModel):
+    activity_id: UUID
+    title: str
+    sport_code: str
+    starts_at: datetime
+    acceso: Literal["escribir", "leer"]
+    participantes: int
+    ultimo: GroupMessage | None
+    unread: int
+    silenciado: bool
+
+
+class ChatReadInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    last_read_id: int = Field(ge=0, le=MAX_ID)
+
+
+class ChatMuteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    muted: bool
