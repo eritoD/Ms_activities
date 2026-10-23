@@ -2,6 +2,22 @@ from fastapi import HTTPException
 
 
 NOT_RATEABLE = "Solo puedes calificar a deportistas con quienes hiciste match o compartiste una actividad ya realizada."
+NO_CHAT = "No tienes acceso al chat de esta actividad."
+UNKNOWN_AUTHOR = "Deportista no disponible"
+
+
+def chat_access(member, cancelled, started):
+    """HU-50: members write until the activity starts, then only read. Cancelled chats close for everyone."""
+    if not member or cancelled:
+        return "ninguno"
+    return "leer" if started else "escribir"
+
+
+def author_name(card):
+    """First name and last-name initial, as on the public card."""
+    if card is None:
+        return UNKNOWN_AUTHOR
+    return f"{card['nombre']} {card['apellido_inicial']}".strip()
 
 
 class ActivitiesService:
@@ -106,3 +122,51 @@ class ActivitiesService:
         # The score of a rater who is no longer active still counts; their card is just not shown.
         return {"average": average, "count": len(rows),
                 "items": [{**row, "rater": raters.get(row['rater_id'])} for row in rows]}
+
+    # ---------- group chat (HU-50) ----------
+    def _chat_access(self, activity):
+        access = chat_access(activity['member'], activity['cancelled'], activity['started'])
+        if access == "ninguno":
+            raise HTTPException(403, NO_CHAT)
+        return access
+
+    def _present_messages(self, actor, rows):
+        # One card lookup per request, not per message. Authors no longer active keep their messages.
+        cards = self.users.cards(list({row['author_id'] for row in rows}), actor.token) if rows else {}
+        return [{**row, "author_name": author_name(cards.get(row['author_id'])), "own": row['author_id'] == actor.id}
+                for row in rows]
+
+    def chat_messages(self, actor, activity_id, after_id, before_id, limit):
+        activity = self.repository.chat_activity(activity_id, actor.id)
+        access = self._chat_access(activity)
+        rows = self.repository.messages(activity_id, after_id, before_id, limit)
+        return {"acceso": access, "participantes": activity['participants'],
+                "silenciado": self.repository.chat_muted(activity_id, actor.id),
+                "mensajes": self._present_messages(actor, rows)}
+
+    def post_message(self, actor, activity_id, payload):
+        def check(activity, existing):
+            access = self._chat_access(activity)
+            # A retry of a message already saved answers with it, even if the chat closed meanwhile.
+            if access != "escribir" and not existing:
+                raise HTTPException(403, "La actividad ya ocurrió; su chat es solo de lectura.")
+        row, _ = self.repository.post_message(activity_id, actor.id, payload.text, payload.client_message_id, check)
+        return self._present_messages(actor, [row])[0]
+
+    def mark_chat_read(self, actor, activity_id, last_read_id):
+        self._chat_access(self.repository.chat_activity(activity_id, actor.id))
+        self.repository.mark_read(activity_id, actor.id, last_read_id)
+
+    def mute_chat(self, actor, activity_id, muted):
+        self._chat_access(self.repository.chat_activity(activity_id, actor.id))
+        self.repository.set_muted(activity_id, actor.id, muted)
+
+    def chats(self, actor):
+        rows = self.repository.chats(actor.id)
+        last = [{"id": row['last_id'], "author_id": row['last_author_id'], "text": row['last_text'],
+                 "created_at": row['last_created_at']} for row in rows if row['last_id'] is not None]
+        presented = {message['id']: message for message in self._present_messages(actor, last)}
+        return [{"activity_id": row['id'], "title": row['title'], "sport_code": row['sport_code'],
+                 "starts_at": row['starts_at'], "acceso": chat_access(True, False, row['started']),
+                 "participantes": row['participants'], "ultimo": presented.get(row['last_id']),
+                 "unread": row['unread'], "silenciado": row['muted']} for row in rows]

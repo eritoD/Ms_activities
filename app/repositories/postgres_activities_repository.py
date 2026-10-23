@@ -284,3 +284,105 @@ class PostgresActivitiesRepository:
             self.execute(cur, """SELECT * FROM activities_api.ratings WHERE rater_id=%s
                 ORDER BY updated_at DESC, id""", (user_id,))
             return cur.fetchall()
+
+    # ---------- group chat ----------
+    # Members are the organizer and the accepted applicants; "started" uses the same clock as the rest.
+    _CHAT_ACTIVITY = """SELECT a.id, a.title, a.sport_code, a.starts_at,
+            a.cancelled_at IS NOT NULL AS cancelled, a.starts_at <= CURRENT_TIMESTAMP AS started,
+            1 + a.accepted_count AS participants,
+            (a.organizer_id = %s OR EXISTS (SELECT 1 FROM activities_api.activity_applications p
+                WHERE p.activity_id = a.id AND p.applicant_id = %s AND p.status = 'accepted')) AS member
+        FROM activities_api.activities a"""
+
+    def _chat_activity(self, cur, activity_id, user_id, lock=False):
+        # FOR SHARE waits for a cancellation, acceptance or withdrawal in progress (they lock FOR UPDATE).
+        self.execute(cur, self._CHAT_ACTIVITY + " WHERE a.id=%s" + (" FOR SHARE OF a" if lock else ""),
+                     (user_id, user_id, activity_id))
+        activity = cur.fetchone()
+        if not activity:
+            raise HTTPException(404, "Actividad no disponible.")
+        return activity
+
+    def chat_activity(self, activity_id, user_id):
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            return self._chat_activity(cur, activity_id, user_id)
+
+    def chat_muted(self, activity_id, user_id):
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, "SELECT muted FROM activities_api.group_chat_state WHERE activity_id=%s AND user_id=%s",
+                         (activity_id, user_id))
+            row = cur.fetchone()
+            return bool(row and row[0])
+
+    def messages(self, activity_id, after_id, before_id, limit):
+        """A page in ascending order: the oldest after `after_id`, otherwise the newest before `before_id`."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            newest_first = after_id is None
+            self.execute(cur, f"""SELECT * FROM activities_api.group_messages WHERE activity_id=%s
+                AND (%s::bigint IS NULL OR id > %s) AND (%s::bigint IS NULL OR id < %s)
+                ORDER BY id {'DESC' if newest_first else 'ASC'} LIMIT %s""",
+                (activity_id, after_id, after_id, before_id, before_id, limit))
+            rows = cur.fetchall()
+            return rows[::-1] if newest_first else rows
+
+    def post_message(self, activity_id, author_id, text, client_message_id, check):
+        """Returns (message, created). `check(activity, existing)` raises when the author may not write."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            activity = self._chat_activity(cur, activity_id, author_id, lock=True)
+            self.execute(cur, """SELECT * FROM activities_api.group_messages
+                WHERE activity_id=%s AND author_id=%s AND client_message_id=%s""",
+                (activity_id, author_id, client_message_id))
+            existing = cur.fetchone()
+            check(activity, existing)
+            if existing:
+                if existing['text'] != text:
+                    raise HTTPException(409, "Este intento ya envió otro mensaje. Actualiza el chat.")
+                return existing, False
+            self.execute(cur, """INSERT INTO activities_api.group_messages (activity_id, author_id, text, client_message_id)
+                VALUES (%s,%s,%s,%s) ON CONFLICT (activity_id, author_id, client_message_id) DO NOTHING
+                RETURNING *""", (activity_id, author_id, text, client_message_id))
+            created = cur.fetchone()
+            if created:
+                return created, True
+            # A concurrent retry inserted first; both callers get the same message.
+            self.execute(cur, """SELECT * FROM activities_api.group_messages
+                WHERE activity_id=%s AND author_id=%s AND client_message_id=%s""",
+                (activity_id, author_id, client_message_id))
+            existing = cur.fetchone()
+            if existing['text'] != text:
+                raise HTTPException(409, "Este intento ya envió otro mensaje. Actualiza el chat.")
+            return existing, False
+
+    def mark_read(self, activity_id, user_id, last_read_id):
+        """Only moves forward, and never past the chat's last message."""
+        with self.pool.connection() as conn:
+            self.execute(conn, """INSERT INTO activities_api.group_chat_state (activity_id, user_id, last_read_id)
+                SELECT %s, %s, LEAST(%s, COALESCE(max(id), 0)) FROM activities_api.group_messages WHERE activity_id=%s
+                ON CONFLICT (activity_id, user_id) DO UPDATE
+                SET last_read_id=GREATEST(group_chat_state.last_read_id, EXCLUDED.last_read_id)""",
+                (activity_id, user_id, last_read_id, activity_id))
+
+    def set_muted(self, activity_id, user_id, muted):
+        with self.pool.connection() as conn:
+            self.execute(conn, """INSERT INTO activities_api.group_chat_state (activity_id, user_id, muted)
+                VALUES (%s,%s,%s) ON CONFLICT (activity_id, user_id) DO UPDATE SET muted=EXCLUDED.muted""",
+                (activity_id, user_id, muted))
+
+    def chats(self, user_id):
+        """Non-cancelled activities where the athlete is a member, with their last message and unread count."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            self.execute(cur, f"""WITH mine AS ({self._CHAT_ACTIVITY} WHERE a.cancelled_at IS NULL AND
+                    (a.organizer_id = %s OR a.id IN (SELECT p.activity_id FROM activities_api.activity_applications p
+                        WHERE p.applicant_id = %s AND p.status = 'accepted')))
+                SELECT m.*, COALESCE(s.muted, false) AS muted,
+                    (SELECT count(*) FROM activities_api.group_messages g WHERE g.activity_id = m.id
+                        AND g.author_id <> %s AND g.id > COALESCE(s.last_read_id, 0)) AS unread,
+                    last.id AS last_id, last.author_id AS last_author_id, last.text AS last_text,
+                    last.created_at AS last_created_at
+                FROM mine m
+                LEFT JOIN activities_api.group_chat_state s ON s.activity_id = m.id AND s.user_id = %s
+                LEFT JOIN LATERAL (SELECT * FROM activities_api.group_messages g WHERE g.activity_id = m.id
+                    ORDER BY g.id DESC LIMIT 1) last ON true
+                ORDER BY last.id DESC NULLS LAST, m.starts_at DESC, m.id""",
+                (user_id, user_id, user_id, user_id, user_id, user_id))
+            return cur.fetchall()
