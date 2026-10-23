@@ -307,23 +307,25 @@ class PostgresActivitiesRepository:
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             return self._chat_activity(cur, activity_id, user_id)
 
-    def chat_muted(self, activity_id, user_id):
-        with self.pool.connection() as conn, conn.cursor() as cur:
+    def chat_page(self, activity_id, user_id, after_id, before_id, limit, check):
+        """(activity, muted, messages) with one connection: the chat is polled every few seconds.
+
+        `check(activity)` raises before any message is read when the user has no access.
+        Messages come in ascending order: the oldest after `after_id`, otherwise the newest before `before_id`.
+        """
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            activity = self._chat_activity(cur, activity_id, user_id)
+            check(activity)
             self.execute(cur, "SELECT muted FROM activities_api.group_chat_state WHERE activity_id=%s AND user_id=%s",
                          (activity_id, user_id))
-            row = cur.fetchone()
-            return bool(row and row[0])
-
-    def messages(self, activity_id, after_id, before_id, limit):
-        """A page in ascending order: the oldest after `after_id`, otherwise the newest before `before_id`."""
-        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            state = cur.fetchone()
             newest_first = after_id is None
             self.execute(cur, f"""SELECT * FROM activities_api.group_messages WHERE activity_id=%s
                 AND (%s::bigint IS NULL OR id > %s) AND (%s::bigint IS NULL OR id < %s)
                 ORDER BY id {'DESC' if newest_first else 'ASC'} LIMIT %s""",
                 (activity_id, after_id, after_id, before_id, before_id, limit))
             rows = cur.fetchall()
-            return rows[::-1] if newest_first else rows
+            return activity, bool(state and state['muted']), rows[::-1] if newest_first else rows
 
     def post_message(self, activity_id, author_id, text, client_message_id, check):
         """Returns (message, created). `check(activity, existing)` raises when the author may not write."""
