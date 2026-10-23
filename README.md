@@ -34,6 +34,11 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | GET | `/api/v1/activities/{id}/applications` | Solo el organizador: solicitudes recibidas (todas, con su estado) y la tarjeta pública de cada postulante. |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/accept` | Solo el organizador: acepta y descuenta un cupo (200). |
 | POST | `/api/v1/activities/{id}/applications/{application_id}/reject` | Solo el organizador: rechaza (200). |
+| GET | `/api/v1/activities/chats` | Chats grupales de tus actividades no canceladas, por último mensaje. |
+| GET | `/api/v1/activities/{id}/chat/messages?after_id=&before_id=&limit=50` | Mensajes del chat grupal (ascendente), acceso, participantes y silencio. |
+| POST | `/api/v1/activities/{id}/chat/messages` | Envía un mensaje `{text, client_message_id}` (201). |
+| POST | `/api/v1/activities/{id}/chat/read` | Marca leído hasta `{last_read_id}` (204). |
+| PUT | `/api/v1/activities/{id}/chat/mute` | Silencia o reactiva los avisos del chat `{muted}` (204). |
 
 Ejemplo del cuerpo para publicar (usar una fecha futura y un UUID nuevo por publicación):
 
@@ -113,6 +118,27 @@ Una actividad cuenta como **realizada** cuando ya pasó su fecha de inicio y no 
 
 `db/migrations/005_ratings.sql` crea `activities_api.ratings` y un índice para buscar postulaciones por deportista.
 
+## Chat grupal de actividad (HU-50)
+
+Cada actividad tiene un chat con sus **miembros**: el organizador y los postulantes aceptados. Pendientes, rechazados y quienes retiraron su postulación no son miembros. El acceso se calcula en cada solicitud:
+
+- `escribir`: miembro, la actividad no está cancelada y aún no comienza.
+- `leer`: miembro y la actividad ya comenzó (misma regla que el resto del servicio: `starts_at` pasada).
+- `ninguno` → 403: no es miembro o la actividad está cancelada. Una actividad inexistente responde 404.
+
+Reglas:
+
+- El autor sale del JWT; un `author_id` en el cuerpo responde 422. `text` va de 1 a 1000 caracteres (se recortan los espacios; solo espacios es 422).
+- `client_message_id` (UUID de la app) hace idempotente el envío: reintentar devuelve el mismo mensaje con 201, también ante reintentos simultáneos o si el chat ya pasó a solo lectura. Reutilizar la clave con otro texto responde 409. La clave es única por actividad y autor.
+- Paginación por id: sin cursores devuelve los `limit` más recientes; `before_id` los anteriores a ese id; `after_id` los siguientes. Siempre en orden ascendente, `limit` de 1 a 100.
+- `author_name` es nombre + inicial del apellido de la tarjeta pública de Users, pedida una sola vez por solicitud. Si el autor dejó de estar disponible, su mensaje queda como «Deportista no disponible». `own` indica si el mensaje es tuyo.
+- `unread` cuenta mensajes de otros con id mayor que tu `last_read_id`. Marcar leído solo avanza y nunca pasa del último mensaje del chat.
+- `participantes` cuenta al organizador más los aceptados.
+- Cada mensaje deja un aviso (`kind = 'mensaje'`, `data = {"screen": "activity_chat", "activityId": ...}`) en `notification_outbox` para los demás miembros que no silenciaron el chat. El aviso nombra la actividad pero **nunca** incluye el texto del mensaje.
+- Enviar bloquea la actividad en modo compartido, así que no se mezcla con una cancelación, aceptación o retiro simultáneos.
+
+`db/migrations/007_group_chat.sql` crea `group_messages` (mensajes, con índice por actividad e id) y `group_chat_state` (último leído y silencio por miembro), además del trigger del aviso.
+
 ## Ejecutar
 
 Con Docker, configurar `ACTIVITIES_DATABASE_URL` y el JWT compartido en `../Ms_gateway/.env`, y ejecutar desde esa carpeta:
@@ -145,7 +171,7 @@ Cada prueba crea y elimina exclusivamente un esquema `activities_test_<uuid>`. S
 
 ## Alcance de esta entrega
 
-Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. La edición y la cancelación se agregaron después (ver «Modificar y eliminar»); el chat grupal sigue fuera de alcance.
+Publicación, listado, paginación y detalle. La pantalla principal y Actividades usan datos reales y conservan el estilo de las tarjetas existentes. El lugar se ingresa como texto; no se calculan distancias para actividades. La edición y la cancelación se agregaron después (ver «Modificar y eliminar»), al igual que el chat grupal (ver «Chat grupal de actividad»).
 
 ## Validación local — 6 de octubre de 2026
 
