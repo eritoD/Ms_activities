@@ -3,12 +3,13 @@ from fastapi import HTTPException
 
 NOT_RATEABLE = "Solo puedes calificar a deportistas con quienes hiciste match o compartiste una actividad ya realizada."
 NO_CHAT = "No tienes acceso al chat de esta actividad."
+CHAT_CLOSED = "El chat de esta actividad ya se cerró."
 UNKNOWN_AUTHOR = "Deportista no disponible"
 
 
-def chat_access(member, cancelled, started):
+def chat_access(member, cancelled, started, closed=False):
     """HU-50: members write until the activity starts, then only read. Cancelled chats close for everyone."""
-    if not member or cancelled:
+    if not member or cancelled or closed:
         return "ninguno"
     return "leer" if started else "escribir"
 
@@ -46,6 +47,15 @@ class ActivitiesService:
         self.repository.cancel(activity_id, actor.id)
 
     def apply(self, actor, activity_id):
+        # A removed application stays final even if the organizer's card later disappears.
+        try:
+            existing = self.repository.application(activity_id, actor.id)
+        except HTTPException as error:
+            if error.status_code != 404:
+                raise
+        else:
+            if existing['status'] == 'removed':
+                raise HTTPException(409, "El organizador te retiró de esta actividad; no puedes volver a postular.")
         # get() hides activities whose organizer is no longer available.
         activity = self.get(actor, activity_id)
         if activity['organizer_id'] == actor.id:
@@ -57,6 +67,9 @@ class ActivitiesService:
 
     def withdraw(self, actor, activity_id):
         self.repository.withdraw(activity_id, actor.id)
+
+    def remove_participant(self, actor, activity_id, user_id):
+        self.repository.remove_participant(activity_id, actor.id, user_id)
 
     def received_applications(self, actor, activity_id):
         # Only the organizer reviews requests; others get 404 so the list's existence is not revealed.
@@ -125,9 +138,11 @@ class ActivitiesService:
 
     # ---------- group chat (HU-50) ----------
     def _chat_access(self, activity):
-        access = chat_access(activity['member'], activity['cancelled'], activity['started'])
+        access = chat_access(activity['member'], activity['cancelled'], activity['started'],
+                             activity.get('chat_closed', False))
         if access == "ninguno":
-            raise HTTPException(403, NO_CHAT)
+            message = CHAT_CLOSED if activity.get('chat_closed') else NO_CHAT
+            raise HTTPException(403, message)
         return access
 
     def _present_messages(self, actor, rows):
