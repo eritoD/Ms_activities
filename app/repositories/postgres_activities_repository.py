@@ -110,6 +110,8 @@ class PostgresActivitiesRepository:
                 raise HTTPException(404, "Actividad no disponible.")
             existing = self._application(cur, activity_id, applicant_id)
             if existing:
+                if existing['status'] == 'removed':
+                    raise HTTPException(409, "El organizador te retiró de esta actividad; no puedes volver a postular.")
                 return existing, False
             if activity['cancelled_at']:
                 raise HTTPException(409, CANCELLED)
@@ -168,6 +170,8 @@ class PostgresActivitiesRepository:
             application = cur.fetchone()
             if not application:
                 raise HTTPException(404, "No has postulado a esta actividad.")
+            if application['status'] == 'removed':
+                raise HTTPException(409, "El organizador te retiró de esta actividad; no puedes cancelar la postulación.")
             if application['status'] == 'rejected':
                 raise HTTPException(409, "Tu postulación fue rechazada; no se puede cancelar.")
             if activity['cancelled_at']:
@@ -178,6 +182,24 @@ class PostgresActivitiesRepository:
                 self.execute(cur, """UPDATE activities_api.activities SET accepted_count=accepted_count-1
                     WHERE id=%s""", (activity_id,))
             self.execute(cur, "DELETE FROM activities_api.activity_applications WHERE id=%s", (application['id'],))
+
+    def remove_participant(self, activity_id, organizer_id, applicant_id):
+        """Removes an accepted participant and releases their spot atomically."""
+        with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
+            activity = self._own_activity_for_update(cur, activity_id, organizer_id)
+            if activity['cancelled_at']:
+                raise HTTPException(409, CANCELLED)
+            if activity['starts_at'] <= datetime.now(timezone.utc):
+                raise HTTPException(422, "La actividad ya comenzó; no puedes sacar participantes.")
+            self.execute(cur, """SELECT * FROM activities_api.activity_applications
+                WHERE activity_id=%s AND applicant_id=%s FOR UPDATE""", (activity_id, applicant_id))
+            application = cur.fetchone()
+            if not application or application['status'] != 'accepted':
+                raise HTTPException(404, "Participante no disponible.")
+            self.execute(cur, """UPDATE activities_api.activity_applications
+                SET status='removed', decided_at=CURRENT_TIMESTAMP WHERE id=%s""", (application['id'],))
+            self.execute(cur, """UPDATE activities_api.activities SET accepted_count=accepted_count-1
+                WHERE id=%s""", (activity_id,))
 
     def application_by_id(self, activity_id, application_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -289,6 +311,7 @@ class PostgresActivitiesRepository:
     # Members are the organizer and the accepted applicants; "started" uses the same clock as the rest.
     _CHAT_ACTIVITY = """SELECT a.id, a.title, a.sport_code, a.starts_at,
             a.cancelled_at IS NOT NULL AS cancelled, a.starts_at <= CURRENT_TIMESTAMP AS started,
+            COALESCE(a.cancelled_at, a.starts_at) + INTERVAL '7 days' <= CURRENT_TIMESTAMP AS chat_closed,
             1 + a.accepted_count AS participants,
             (a.organizer_id = %s OR EXISTS (SELECT 1 FROM activities_api.activity_applications p
                 WHERE p.activity_id = a.id AND p.applicant_id = %s AND p.status = 'accepted')) AS member
@@ -374,6 +397,7 @@ class PostgresActivitiesRepository:
         """Non-cancelled activities where the athlete is a member, with their last message and unread count."""
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             self.execute(cur, f"""WITH mine AS ({self._CHAT_ACTIVITY} WHERE a.cancelled_at IS NULL AND
+                    a.starts_at > CURRENT_TIMESTAMP - INTERVAL '7 days' AND
                     (a.organizer_id = %s OR a.id IN (SELECT p.activity_id FROM activities_api.activity_applications p
                         WHERE p.applicant_id = %s AND p.status = 'accepted')))
                 SELECT m.*, COALESCE(s.muted, false) AS muted,
@@ -388,3 +412,32 @@ class PostgresActivitiesRepository:
                 ORDER BY last.id DESC NULLS LAST, m.starts_at DESC, m.id""",
                 (user_id, user_id, user_id, user_id, user_id, user_id))
             return cur.fetchall()
+
+    def purge_old_chats(self, now=None):
+        """Purges chat rows for up to 500 expired activities under a cross-replica lock."""
+        now = now or datetime.now(timezone.utc)
+        with self.pool.connection() as conn:
+            lock_key = "activities-api-chat-purge"
+            locked = conn.execute("SELECT pg_try_advisory_lock(hashtextextended(%s, 0))", (lock_key,)).fetchone()[0]
+            if not locked:
+                return 0
+            try:
+                with conn.cursor(row_factory=dict_row) as cur:
+                    self.execute(cur, """SELECT a.id FROM activities_api.activities a
+                        WHERE COALESCE(a.cancelled_at, a.starts_at) <= %s - INTERVAL '7 days'
+                            AND (EXISTS (SELECT 1 FROM activities_api.group_messages m WHERE m.activity_id=a.id)
+                                 OR EXISTS (SELECT 1 FROM activities_api.group_chat_state s WHERE s.activity_id=a.id))
+                        ORDER BY COALESCE(a.cancelled_at, a.starts_at), a.id
+                        LIMIT 500 FOR UPDATE OF a SKIP LOCKED""", (now,))
+                    activity_ids = [row['id'] for row in cur.fetchall()]
+                    if activity_ids:
+                        self.execute(cur, "DELETE FROM activities_api.group_messages WHERE activity_id = ANY(%s)",
+                                     (activity_ids,))
+                        self.execute(cur, "DELETE FROM activities_api.group_chat_state WHERE activity_id = ANY(%s)",
+                                     (activity_ids,))
+                conn.commit()
+                return len(activity_ids)
+            finally:
+                conn.rollback()
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (lock_key,))
+                conn.commit()

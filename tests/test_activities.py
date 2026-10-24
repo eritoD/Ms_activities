@@ -164,6 +164,16 @@ def test_inactive_organizer_not_exposed(system):
     assert client.get(PREFIX + '/' + created['id'], headers=headers(B)).status_code == 404
 
 
+def test_blocked_organizer_card_hides_activity_and_prevents_application(system):
+    client, _, directory, _ = system
+    created = publish(client)
+    # Ms_Users omits a public card when either person has blocked the other.
+    directory.active.remove(A)
+    assert created['id'] not in {row['id'] for row in client.get(PREFIX, headers=headers(B)).json()['items']}
+    response = apply(client, created['id'], actor=B)
+    assert response.status_code == 404
+
+
 def apply(client, activity_id, actor=B):
     return client.post(f"{PREFIX}/{activity_id}/applications", headers=headers(actor))
 
@@ -529,6 +539,57 @@ def test_accepted_applicant_withdraws_and_frees_the_spot(system):
     assert withdraw(client, activity['id']).status_code == 204
     assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(C)).json()['available_spots'] == 1
     assert apply(client, activity['id'], actor=C).status_code == 201    # The spot is free again.
+
+
+def remove_participant(client, activity_id, user_id, actor=A):
+    return client.delete(f"{PREFIX}/{activity_id}/participants/{user_id}", headers=headers(actor))
+
+
+def test_organizer_removes_accepted_participant_and_frees_spot(system):
+    client, repo, _, _ = system
+    activity = publish(client, capacity=1, title='Trote')
+    application = apply(client, activity['id']).json()
+    decide(client, activity['id'], application['id'], 'accept')
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(C)).json()['available_spots'] == 0
+    assert remove_participant(client, activity['id'], B).status_code == 204
+    saved = client.get(f"{PREFIX}/{activity['id']}/applications/me", headers=headers(B))
+    assert saved.status_code == 200 and saved.json()['status'] == 'removed'
+    assert client.get(f"{PREFIX}/{activity['id']}", headers=headers(C)).json()['available_spots'] == 1
+    response = apply(client, activity['id'])
+    assert response.status_code == 409
+    assert response.json()['detail'] == 'El organizador te retiró de esta actividad; no puedes volver a postular.'
+    assert withdraw(client, activity['id']).status_code == 409
+    with repo.pool.connection() as conn, conn.cursor() as cur:
+        repo.execute(cur, "SELECT title FROM activities_api.notification_outbox WHERE user_id=%s ORDER BY id DESC LIMIT 1", (B,))
+        assert cur.fetchone()[0] == 'Ya no participas en «Trote»'
+
+
+def test_only_organizer_can_remove_an_accepted_participant(system):
+    client, _, _, _ = system
+    activity = publish(client)
+    application = apply(client, activity['id']).json()
+    decide(client, activity['id'], application['id'], 'accept')
+    assert remove_participant(client, activity['id'], B, actor=C).status_code == 404
+    assert remove_participant(client, str(uuid4()), B).status_code == 404
+
+
+def test_cannot_remove_a_non_accepted_or_started_or_cancelled_participant(system):
+    client, repo, _, _ = system
+    pending = publish(client)
+    apply(client, pending['id'])
+    assert remove_participant(client, pending['id'], B).status_code == 404
+    accepted = publish(client)
+    application = apply(client, accepted['id']).json()
+    decide(client, accepted['id'], application['id'], 'accept')
+    start(repo, accepted['id'])
+    response = remove_participant(client, accepted['id'], B)
+    assert response.status_code == 422
+    assert response.json()['detail'] == 'La actividad ya comenzó; no puedes sacar participantes.'
+    cancelled = publish(client)
+    application = apply(client, cancelled['id']).json()
+    decide(client, cancelled['id'], application['id'], 'accept')
+    remove(client, cancelled['id'])
+    assert remove_participant(client, cancelled['id'], B).status_code == 409
 
 
 def test_who_cannot_cancel_an_application(system):

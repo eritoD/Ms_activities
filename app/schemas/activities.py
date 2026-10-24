@@ -69,7 +69,7 @@ class ActivityPage(BaseModel):
 class ActivityApplication(BaseModel):
     id: UUID
     activity_id: UUID
-    status: Literal["pending", "accepted", "rejected"]
+    status: Literal["pending", "accepted", "rejected", "removed"]
     created_at: datetime
     decided_at: datetime | None = None
 

@@ -108,6 +108,12 @@ def withdraw(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_se
     return Response(status_code=204)
 
 
+@router.delete("/{activity_id}/participants/{user_id}", status_code=204)
+def remove_participant(activity_id: UUID, user_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
+    service.remove_participant(actor, activity_id, user_id)
+    return Response(status_code=204)
+
+
 @router.get("/{activity_id}/applications", response_model=list[ReceivedApplication])
 def received_applications(activity_id: UUID, actor=Depends(get_actor), service=Depends(get_service)):
     return service.received_applications(actor, activity_id)

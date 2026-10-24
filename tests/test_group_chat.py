@@ -1,6 +1,6 @@
 """HU-50 group chat: access rules without a database, then the API on isolated PostgreSQL schemas."""
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
@@ -20,6 +20,10 @@ from tests.test_activities import (
 ])
 def test_chat_access_rules(member, cancelled, started, expected):
     assert chat_access(member, cancelled, started) == expected
+
+
+def test_expired_chat_has_no_access():
+    assert chat_access(True, False, True, closed=True) == 'ninguno'
 
 
 def test_author_name_uses_first_name_and_initial():
@@ -166,6 +170,37 @@ def test_past_activity_is_read_only(system):
     # A late retry of a message that was already saved still answers with it.
     late = send(client, activity['id'], client_message_id=retry, text='Antes de empezar')
     assert late.status_code == 201 and late.json()['id'] == page['mensajes'][0]['id']
+
+
+def test_chat_closes_and_disappears_seven_days_after_activity(system):
+    client, repo, _, _ = system
+    activity = group(client, B)
+    send(client, activity['id'])
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=CURRENT_TIMESTAMP-INTERVAL '8 days' WHERE id=%s",
+                     (activity['id'],))
+    response = read(client, activity['id'])
+    assert response.status_code == 403
+    assert response.json()['detail'] == 'El chat de esta actividad ya se cerró.'
+    listed = client.get(PREFIX + '/chats', headers=headers(A)).json()
+    assert activity['id'] not in {row['activity_id'] for row in listed}
+
+
+def test_purge_old_chats_accepts_an_injected_clock(system):
+    client, repo, _, _ = system
+    activity = group(client, B)
+    send(client, activity['id'])
+    now = datetime.now(timezone.utc)
+    with repo.pool.connection() as conn:
+        repo.execute(conn, "UPDATE activities_api.activities SET starts_at=%s WHERE id=%s",
+                     (now - timedelta(days=8), activity['id']))
+    assert repo.purge_old_chats(now=now) == 1
+    with repo.pool.connection() as conn, conn.cursor() as cur:
+        repo.execute(cur, "SELECT count(*) FROM activities_api.group_messages WHERE activity_id=%s", (activity['id'],))
+        assert cur.fetchone()[0] == 0
+        repo.execute(cur, "SELECT count(*) FROM activities_api.group_chat_state WHERE activity_id=%s", (activity['id'],))
+        assert cur.fetchone()[0] == 0
+    assert repo.purge_old_chats(now=now) == 0
 
 
 def test_retries_are_idempotent(system):
