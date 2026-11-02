@@ -633,3 +633,26 @@ def test_organizer_is_notified_when_someone_withdraws(system):
     with repo.pool.connection() as conn:
         repo.execute(conn, "DELETE FROM activities_api.activities WHERE id=%s", (activity['id'],))
     assert len(outbox(repo)) == before
+
+
+# -- HU-47: the author of an activity, for the report/sanction flow (internal endpoint) --------------------------
+
+SERVICE_TOKEN = "service-to-service-secret-with-32-bytes-min"
+
+
+def test_internal_author_endpoint_needs_the_service_secret_and_gives_only_the_account(system, monkeypatch):
+    client, _, _, _ = system
+    created = publish(client, actor=A)
+    url = f"/internal/v1/activities/{created['id']}/author"
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", SERVICE_TOKEN)
+    assert client.get(url).status_code == 401
+    assert client.get(url, headers={"X-Internal-Service-Token": "otro"}).status_code == 401
+    assert client.get(url, headers=headers(A)).status_code == 401                 # a user token is not a service secret
+    ok = client.get(url, headers={"X-Internal-Service-Token": SERVICE_TOKEN})
+    assert ok.status_code == 200 and ok.json() == {"user_id": str(A)}
+    assert client.get(f"/internal/v1/activities/{uuid4()}/author", headers={"X-Internal-Service-Token": SERVICE_TOKEN}).status_code == 404
+    assert client.get("/internal/v1/activities/no-es-uuid/author", headers={"X-Internal-Service-Token": SERVICE_TOKEN}).status_code == 422
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", "corto")
+    assert client.get(url, headers={"X-Internal-Service-Token": "corto"}).status_code == 503
+    monkeypatch.delenv("INTERNAL_SERVICE_TOKEN")
+    assert client.get(url, headers={"X-Internal-Service-Token": SERVICE_TOKEN}).status_code == 503

@@ -6,6 +6,7 @@ from threading import Event, Thread
 import httpx
 from fastapi import FastAPI
 
+from app.api.internal import router as internal_router
 from app.api.v1.activities import ratings_router, router
 from app.core.config import get_settings
 from app.database.session import create_pool
@@ -62,6 +63,7 @@ def create_app(service=None, settings=None):
         app.state.settings = settings
     app.include_router(router)
     app.include_router(ratings_router)
+    app.include_router(internal_router)
     return app
 
 
