@@ -137,6 +137,17 @@ Reglas:
 - Cada mensaje deja un aviso (`kind = 'mensaje'`, `data = {"screen": "activity_chat", "activityId": ...}`) en `notification_outbox` para los demás miembros que no silenciaron el chat. El aviso nombra la actividad pero **nunca** incluye el texto del mensaje.
 - Enviar bloquea la actividad en modo compartido, así que no se mezcla con una cancelación, aceptación o retiro simultáneos.
 
+**Responder a un mensaje y ver el perfil (HU-64).** `POST /{id}/chat/messages` acepta `reply_to`: el id de un mensaje **de este mismo chat**
+(entero de 1 en adelante, si no 422). Si no existe o es de otro chat responde `404` «El mensaje citado no está disponible.» (igual en los dos
+casos) y no guarda nada; la clave foránea `(activity_id, reply_to_id)` lo vuelve a exigir. Reutilizar `client_message_id` con otra cita (o sin ella)
+es 409. Cada mensaje devuelve ahora `author_photo` (la foto de HU-61, para abrir el perfil con el id del autor y la tarjeta de Users), `reply_to_id` y
+`reply_to` = `{id, author_id, author_name, text, available}` con el texto recortado a 100 caracteres; si el original ya no existe,
+`{id: null, author_id: null, author_name: null, text: null, available: false}` sin mostrar lo que decía (la marca `is_reply` se guarda al enviar). El
+historial trae las vistas previas en la misma consulta y los autores citados en la misma consulta de tarjetas de Users. `GET /{id}/chat/messages?around_id=`
+devuelve la página que contiene ese mensaje, centrada en él (`limit` máximo 100; 404 si no es de este chat; 422 si se combina con `after_id` o `before_id`) y
+exige el mismo acceso que leer el chat. Los avisos son los de siempre (el trigger de cada mensaje; sin el texto; el chat silenciado no avisa). La purga de
+los 7 días borra respuestas y originales juntos. Migración `009_group_message_replies.sql` (idempotente).
+
 `db/migrations/007_group_chat.sql` crea `group_messages` (mensajes, con índice por actividad e id) y `group_chat_state` (último leído y silencio por miembro), además del trigger del aviso.
 
 ## Ejecutar

@@ -130,15 +130,32 @@ class GroupMessageInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     text: str = Field(min_length=1, max_length=1000)
     client_message_id: UUID
+    # HU-64: the message of this same chat this one answers.
+    reply_to: int | None = Field(default=None, ge=1, le=MAX_ID)
+
+
+class GroupReplyPreview(BaseModel):
+    """What a reply shows of the message it quotes: author, a short text. If the quoted message is gone, only
+    `available` false (nothing of what it said)."""
+
+    id: int | None
+    author_id: UUID | None
+    author_name: str | None
+    text: str | None
+    available: bool
 
 
 class GroupMessage(BaseModel):
     id: int
     author_id: UUID
     author_name: str
+    # Photo of the author (HU-61 path on the gateway) so tapping the name or the photo can open the profile.
+    author_photo: str | None = None
     text: str
     created_at: datetime
     own: bool
+    reply_to_id: int | None = None
+    reply_to: GroupReplyPreview | None = None
 
 
 class GroupChatMessages(BaseModel):

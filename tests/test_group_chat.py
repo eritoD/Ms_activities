@@ -117,7 +117,8 @@ def test_organizer_and_accepted_participant_write_and_read(system):
     first = send(client, activity['id'], text='  Nos vemos a las 7  ')
     assert first.status_code == 201, first.text
     message = first.json()
-    assert set(message) == {'id', 'author_id', 'author_name', 'text', 'created_at', 'own'}
+    assert set(message) == {'id', 'author_id', 'author_name', 'author_photo', 'text', 'created_at', 'own',
+                           'reply_to_id', 'reply_to'}  # HU-64 added the photo and the reply fields
     assert message['text'] == 'Nos vemos a las 7' and message['own'] is True
     assert message['author_id'] == str(A) and message['author_name'] == 'Deportista T.'
     assert send(client, activity['id'], actor=B, text='Listo').status_code == 201
