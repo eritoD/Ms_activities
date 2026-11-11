@@ -12,6 +12,12 @@ EDITABLE_COLUMNS = ("title", "sport_code", "description", "starts_at", "location
 CANCELLED = "La actividad fue cancelada."
 
 
+# A message with the author and text of the one it quotes, in the same query (no query per message).
+_WITH_REPLY = """SELECT g.*, o.author_id AS reply_author_id, o.text AS reply_text
+    FROM activities_api.group_messages g
+    LEFT JOIN activities_api.group_messages o ON o.activity_id = g.activity_id AND o.id = g.reply_to_id"""
+
+
 class PostgresActivitiesRepository:
     def __init__(self, pool, schema="activities_api"):
         self.pool, self.schema = pool, schema
@@ -352,7 +358,13 @@ class PostgresActivitiesRepository:
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             return self._chat_activity(cur, activity_id, user_id)
 
-    def chat_page(self, activity_id, user_id, after_id, before_id, limit, check):
+    def chat_has_message(self, activity_id, message_id):
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, "SELECT 1 FROM activities_api.group_messages WHERE activity_id=%s AND id=%s",
+                         (activity_id, message_id))
+            return cur.fetchone() is not None
+
+    def chat_page(self, activity_id, user_id, after_id, before_id, limit, check, around_id=None):
         """(activity, muted, messages) with one connection: the chat is polled every few seconds.
 
         `check(activity)` raises before any message is read when the user has no access.
@@ -364,15 +376,31 @@ class PostgresActivitiesRepository:
             self.execute(cur, "SELECT muted FROM activities_api.group_chat_state WHERE activity_id=%s AND user_id=%s",
                          (activity_id, user_id))
             state = cur.fetchone()
+            if around_id is not None:
+                # HU-64: the page that holds a quoted message, centred on it. 404 if it is not one of this chat's.
+                self.execute(cur, "SELECT 1 FROM activities_api.group_messages WHERE activity_id=%s AND id=%s",
+                             (activity_id, around_id))
+                if cur.fetchone() is None:
+                    raise HTTPException(404, "El mensaje no está disponible.")
+                self.execute(cur, f"""SELECT * FROM ({_WITH_REPLY} WHERE g.activity_id=%s AND g.id<=%s
+                        ORDER BY g.id DESC LIMIT %s) older
+                    UNION ALL
+                    SELECT * FROM ({_WITH_REPLY} WHERE g.activity_id=%s AND g.id>%s ORDER BY g.id LIMIT %s) newer
+                    ORDER BY id""", (activity_id, around_id, (limit + 1) // 2, activity_id, around_id, limit // 2))
+                return activity, bool(state and state['muted']), cur.fetchall()
             newest_first = after_id is None
-            self.execute(cur, f"""SELECT * FROM activities_api.group_messages WHERE activity_id=%s
-                AND (%s::bigint IS NULL OR id > %s) AND (%s::bigint IS NULL OR id < %s)
-                ORDER BY id {'DESC' if newest_first else 'ASC'} LIMIT %s""",
+            self.execute(cur, f"""{_WITH_REPLY} WHERE g.activity_id=%s
+                AND (%s::bigint IS NULL OR g.id > %s) AND (%s::bigint IS NULL OR g.id < %s)
+                ORDER BY g.id {'DESC' if newest_first else 'ASC'} LIMIT %s""",
                 (activity_id, after_id, after_id, before_id, before_id, limit))
             rows = cur.fetchall()
             return activity, bool(state and state['muted']), rows[::-1] if newest_first else rows
 
-    def post_message(self, activity_id, author_id, text, client_message_id, check):
+    def _saved_message(self, cur, message_id):
+        self.execute(cur, f"{_WITH_REPLY} WHERE g.id=%s", (message_id,))
+        return cur.fetchone()
+
+    def post_message(self, activity_id, author_id, text, client_message_id, check, reply_to=None):
         """Returns (message, created). `check(activity, existing)` raises when the author may not write."""
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             activity = self._chat_activity(cur, activity_id, author_id, lock=True)
@@ -382,23 +410,31 @@ class PostgresActivitiesRepository:
             existing = cur.fetchone()
             check(activity, existing)
             if existing:
-                if existing['text'] != text:
+                if existing['text'] != text or existing['reply_to_id'] != reply_to:
                     raise HTTPException(409, "Este intento ya envió otro mensaje. Actualiza el chat.")
-                return existing, False
-            self.execute(cur, """INSERT INTO activities_api.group_messages (activity_id, author_id, text, client_message_id)
-                VALUES (%s,%s,%s,%s) ON CONFLICT (activity_id, author_id, client_message_id) DO NOTHING
-                RETURNING *""", (activity_id, author_id, text, client_message_id))
+                return self._saved_message(cur, existing['id']), False
+            if reply_to is not None:
+                # HU-64: only a message of THIS chat can be answered. One answer for "does not exist" and "belongs
+                # to another chat", so the id of somebody else's message tells nothing.
+                self.execute(cur, "SELECT 1 FROM activities_api.group_messages WHERE activity_id=%s AND id=%s",
+                             (activity_id, reply_to))
+                if cur.fetchone() is None:
+                    raise HTTPException(404, "El mensaje citado no está disponible.")
+            self.execute(cur, """INSERT INTO activities_api.group_messages
+                    (activity_id, author_id, text, client_message_id, reply_to_id, is_reply)
+                VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT (activity_id, author_id, client_message_id) DO NOTHING
+                RETURNING *""", (activity_id, author_id, text, client_message_id, reply_to, reply_to is not None))
             created = cur.fetchone()
             if created:
-                return created, True
+                return self._saved_message(cur, created['id']), True
             # A concurrent retry inserted first; both callers get the same message.
             self.execute(cur, """SELECT * FROM activities_api.group_messages
                 WHERE activity_id=%s AND author_id=%s AND client_message_id=%s""",
                 (activity_id, author_id, client_message_id))
             existing = cur.fetchone()
-            if existing['text'] != text:
+            if existing['text'] != text or existing['reply_to_id'] != reply_to:
                 raise HTTPException(409, "Este intento ya envió otro mensaje. Actualiza el chat.")
-            return existing, False
+            return self._saved_message(cur, existing['id']), False
 
     def mark_read(self, activity_id, user_id, last_read_id):
         """Only moves forward, and never past the chat's last message."""

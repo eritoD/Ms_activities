@@ -52,8 +52,11 @@ def chats(actor=Depends(get_actor), service=Depends(get_service)):
 @router.get("/{activity_id}/chat/messages", response_model=GroupChatMessages)
 def chat_messages(activity_id: UUID, after_id: int | None = Query(None, ge=0, le=MAX_ID),
                   before_id: int | None = Query(None, ge=1, le=MAX_ID),
+                  around_id: int | None = Query(None, ge=1, le=MAX_ID),
                   limit: int = Query(50, ge=1, le=100), actor=Depends(get_actor), service=Depends(get_service)):
-    return service.chat_messages(actor, activity_id, after_id, before_id, limit)
+    """`around_id` (HU-64) returns the page that holds that message of this chat, centred on it; 404 if it is not
+    one of this chat's messages. Use only one of after_id, before_id and around_id."""
+    return service.chat_messages(actor, activity_id, after_id, before_id, limit, around_id)
 
 
 @router.post("/{activity_id}/chat/messages", response_model=GroupMessage, status_code=201)

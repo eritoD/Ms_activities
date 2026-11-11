@@ -7,6 +7,7 @@ NOT_RATEABLE = "Solo puedes calificar a deportistas con quienes hiciste match o 
 NO_CHAT = "No tienes acceso al chat de esta actividad."
 CHAT_CLOSED = "El chat de esta actividad ya se cerró."
 UNKNOWN_AUTHOR = "Deportista no disponible"
+REPLY_PREVIEW_CHARACTERS = 100  # a quoted message is shown cut short, never whole (HU-64)
 
 
 def chat_access(member, cancelled, started, closed=False):
@@ -163,15 +164,35 @@ class ActivitiesService:
             raise HTTPException(403, message)
         return access
 
-    def _present_messages(self, actor, rows):
-        # One card lookup per request, not per message. Authors no longer active keep their messages.
-        cards = self.users.cards(list({row['author_id'] for row in rows}), actor.token) if rows else {}
-        return [{**row, "author_name": author_name(cards.get(row['author_id'])), "own": row['author_id'] == actor.id}
-                for row in rows]
+    @staticmethod
+    def _reply_preview(row, cards):
+        """What a reply shows of the message it quotes (HU-64): author and the first characters; or only
+        "not available" if it was removed. Nothing for a message that is not a reply."""
+        if row.get('reply_to_id') is not None:
+            text = (row.get('reply_text') or "").strip()
+            if len(text) > REPLY_PREVIEW_CHARACTERS:
+                text = text[:REPLY_PREVIEW_CHARACTERS].rstrip() + "…"
+            return {"id": row['reply_to_id'], "author_id": row.get('reply_author_id'), "text": text, "available": True,
+                    "author_name": author_name(cards.get(row.get('reply_author_id')))}
+        if row.get('is_reply'):  # a reply whose quoted message no longer exists
+            return {"id": None, "author_id": None, "author_name": None, "text": None, "available": False}
+        return None
 
-    def chat_messages(self, actor, activity_id, after_id, before_id, limit):
+    def _present_messages(self, actor, rows):
+        # One card lookup per request, not per message (the quoted authors travel in the same lookup).
+        # Authors no longer active keep their messages.
+        wanted = {row['author_id'] for row in rows} | {row['reply_author_id'] for row in rows if row.get('reply_author_id')}
+        cards = self.users.cards(list(wanted), actor.token) if rows else {}
+        return [{**row, "author_name": author_name(cards.get(row['author_id'])),
+                 "author_photo": (cards.get(row['author_id']) or {}).get('foto_perfil'),
+                 "own": row['author_id'] == actor.id, "reply_to": self._reply_preview(row, cards)} for row in rows]
+
+    def chat_messages(self, actor, activity_id, after_id, before_id, limit, around_id=None):
+        if sum(cursor is not None for cursor in (after_id, before_id, around_id)) > 1:
+            raise HTTPException(422, "Usa un solo cursor de mensajes.")
+        extra = {} if around_id is None else {"around_id": around_id}
         activity, muted, rows = self.repository.chat_page(activity_id, actor.id, after_id, before_id, limit,
-                                                          self._chat_access)
+                                                          self._chat_access, **extra)
         return {"acceso": self._chat_access(activity), "participantes": activity['participants'],
                 "silenciado": muted, "mensajes": self._present_messages(actor, rows)}
 
@@ -181,7 +202,9 @@ class ActivitiesService:
             # A retry of a message already saved answers with it, even if the chat closed meanwhile.
             if access != "escribir" and not existing:
                 raise HTTPException(403, "La actividad ya ocurrió; su chat es solo de lectura.")
-        row, _ = self.repository.post_message(activity_id, actor.id, payload.text, payload.client_message_id, check)
+        extra = {} if payload.reply_to is None else {"reply_to": payload.reply_to}
+        row, _ = self.repository.post_message(activity_id, actor.id, payload.text, payload.client_message_id, check,
+                                              **extra)
         return self._present_messages(actor, [row])[0]
 
     def mark_chat_read(self, actor, activity_id, last_read_id):
