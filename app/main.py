@@ -14,6 +14,8 @@ from app.repositories.postgres_activities_repository import PostgresActivitiesRe
 from app.services.activities_service import ActivitiesService
 from app.services.matching_client import MatchingClient
 from app.services.users_client import UsersClient
+from app.services.entitlements_client import (EntitlementsClient, LimitePlanError, limite_plan_handler,
+                                              settings_from_env)
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +47,17 @@ def create_app(service=None, settings=None):
                 purge_thread = Thread(target=_chat_purge_worker, args=(repository, stop_purge),
                                       name="activity-chat-purge", daemon=True)
                 purge_thread.start()
+            entitlement_settings = settings_from_env()
+            entitlements = EntitlementsClient(entitlement_settings) if entitlement_settings else None
             try:
                 with httpx.Client(base_url=config.users_url, timeout=10, trust_env=False) as client,                         httpx.Client(base_url=config.matching_url, timeout=10, trust_env=False) as matching:
                     app.state.settings = config
-                    app.state.service = ActivitiesService(repository, UsersClient(client), MatchingClient(matching))
+                    app.state.service = ActivitiesService(repository, UsersClient(client), MatchingClient(matching),
+                                                          entitlements=entitlements)
                     yield
             finally:
+                if entitlements is not None:
+                    entitlements.close()
                 if purge_thread:
                     stop_purge.set()
                     purge_thread.join(timeout=5)
@@ -58,6 +65,8 @@ def create_app(service=None, settings=None):
             pool.close()
 
     app = FastAPI(title="SportMatch Activities", lifespan=lifespan)
+    # HU-54: plan limit reached -> 402 {codigo: "LIMITE_PLAN", limite, usado, se_libera_en}.
+    app.add_exception_handler(LimitePlanError, limite_plan_handler)
     if service is not None:
         app.state.service = service
         app.state.settings = settings

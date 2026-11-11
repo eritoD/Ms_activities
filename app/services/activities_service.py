@@ -1,5 +1,7 @@
 from fastapi import HTTPException
 
+from app.services.entitlements_client import enforce, uso
+
 
 NOT_RATEABLE = "Solo puedes calificar a deportistas con quienes hiciste match o compartiste una actividad ya realizada."
 NO_CHAT = "No tienes acceso al chat de esta actividad."
@@ -22,8 +24,10 @@ def author_name(card):
 
 
 class ActivitiesService:
-    def __init__(self, repository, users, matching=None):
+    def __init__(self, repository, users, matching=None, entitlements=None):
         self.repository, self.users, self.matching = repository, users, matching
+        # HU-54: plan limits read from ms-pago; None = no limits (fail-open).
+        self.entitlements = entitlements
 
     def present(self, row, organizer):
         # Response schemas expose only the public card, never email, RUT or private location.
@@ -32,7 +36,17 @@ class ActivitiesService:
 
     def create(self, actor, payload):
         organizer = self.users.card(actor.id, actor.token)
+        if self.entitlements is not None and not self.repository.activity_exists(actor.id, payload.client_activity_id):
+            enforce(self.entitlements, "usuario", actor.id, "actividades_organizadas",
+                    lambda since: self.repository.activities_created_since(actor.id, since))
         return self.present(self.repository.create(actor.id, payload), organizer)
+
+    def plan_usage(self, actor):
+        """HU-54: uso de las acciones limitadas de este servicio (mismas consultas que el 402)."""
+        return uso(self.entitlements, "usuario", actor.id, {
+            "postulaciones_actividades": lambda since: self.repository.applications_since(actor.id, since),
+            "actividades_organizadas": lambda since: self.repository.activities_created_since(actor.id, since),
+        })
 
     def get(self, actor, activity_id):
         row = self.repository.get(activity_id)
@@ -48,6 +62,7 @@ class ActivitiesService:
 
     def apply(self, actor, activity_id):
         # A removed application stays final even if the organizer's card later disappears.
+        existing = None
         try:
             existing = self.repository.application(activity_id, actor.id)
         except HTTPException as error:
@@ -60,6 +75,9 @@ class ActivitiesService:
         activity = self.get(actor, activity_id)
         if activity['organizer_id'] == actor.id:
             raise HTTPException(409, "No puedes postular a tu propia actividad.")
+        if existing is None and self.entitlements is not None:  # repeating an application creates nothing
+            enforce(self.entitlements, "usuario", actor.id, "postulaciones_actividades",
+                    lambda since: self.repository.applications_since(actor.id, since))
         return self.repository.apply(activity_id, actor.id)
 
     def my_application(self, actor, activity_id):
