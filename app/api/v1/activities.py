@@ -31,6 +31,12 @@ def create(payload: ActivityCreate, actor=Depends(get_actor), service=Depends(ge
     return service.create(actor, payload)
 
 
+# HU-54: uso del plan ("Te quedan X de N hoy"). Before "/{activity_id}" like the others.
+@router.get("/plan-usage")
+def plan_usage(actor=Depends(get_actor), service=Depends(get_service)):
+    return service.plan_usage(actor)
+
+
 # Declared before "/{activity_id}" so "history" is not read as an activity ID.
 @router.get("/history", response_model=ActivityHistory)
 def history(limit: int = Query(50, ge=1, le=100), actor=Depends(get_actor), service=Depends(get_service)):

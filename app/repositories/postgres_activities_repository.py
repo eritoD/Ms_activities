@@ -57,6 +57,28 @@ class PostgresActivitiesRepository:
                  payload.description, payload.starts_at, payload.location, payload.capacity))
             return cur.fetchone()
 
+    # ---------- HU-54: plan limits (rolling windows over the existing tables) ----------
+    def activities_created_since(self, organizer_id, since):
+        """Activities the athlete published since `since`; cancelled ones count too (they were organized)."""
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, """SELECT created_at FROM activities_api.activities
+                WHERE organizer_id=%s AND created_at > %s ORDER BY created_at""", (organizer_id, since))
+            return [row[0] for row in cur.fetchall()]
+
+    def activity_exists(self, organizer_id, client_activity_id):
+        """A retry of an already published activity is not a new one."""
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, """SELECT 1 FROM activities_api.activities
+                WHERE organizer_id=%s AND client_activity_id=%s""", (organizer_id, client_activity_id))
+            return cur.fetchone() is not None
+
+    def applications_since(self, applicant_id, since):
+        """Applications the athlete sent since `since`, whatever happened to them afterwards."""
+        with self.pool.connection() as conn, conn.cursor() as cur:
+            self.execute(cur, """SELECT created_at FROM activities_api.activity_applications
+                WHERE applicant_id=%s AND created_at > %s ORDER BY created_at""", (applicant_id, since))
+            return [row[0] for row in cur.fetchall()]
+
     def get(self, activity_id):
         with self.pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             self.execute(cur, "SELECT * FROM activities_api.activities WHERE id=%s", (activity_id,))
