@@ -66,10 +66,20 @@ class ActivitiesService:
         activity = self.get(actor, activity_id)
         if activity['organizer_id'] == actor.id:
             raise HTTPException(409, "No puedes postular a tu propia actividad.")
-        if existing is None and self.entitlements is not None:  # repeating an application creates nothing
+        if self.entitlements is not None and not self._already_applied(actor, activity_id):
+            # repeating an application creates nothing, so it does not use up the limit
             enforce(self.entitlements, "usuario", actor.id, "postulaciones_actividades",
                     lambda since: self.repository.applications_since(actor.id, since))
         return self.repository.apply(activity_id, actor.id)
+
+    def _already_applied(self, actor, activity_id):
+        try:
+            self.repository.application(activity_id, actor.id)
+            return True
+        except HTTPException as error:
+            if error.status_code == 404:
+                return False
+            raise
 
     def my_application(self, actor, activity_id):
         return self.repository.application(activity_id, actor.id)

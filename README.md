@@ -21,6 +21,7 @@ El gateway publica estas rutas; todas requieren un token de acceso de Ms_Users.
 | POST | `/api/v1/activities` | Publica una actividad (201). |
 | GET | `/api/v1/activities?limit=20&cursor=UUID` | Próximas actividades por fecha, con `items` y `next_cursor`. |
 | GET | `/api/v1/activities/{id}` | Detalle, incluido organizador público. |
+| GET | `/api/v1/activities/plan-usage` | Uso de tu plan: postulaciones a actividades (5 cada 24 h en Gratis) y actividades organizadas (3 cada 30 días). Antes de `/{id}` en el router; los límites los define Ms-pago y al alcanzarlos se responde 402 `LIMITE_PLAN`. Si Ms-pago no responde, se permite (fail-open). |
 | PATCH | `/api/v1/activities/{id}` | Solo el organizador: modifica los campos enviados (200). |
 | DELETE | `/api/v1/activities/{id}` | Solo el organizador: elimina (cancela) la actividad (204). |
 | GET | `/api/v1/activities/history?limit=50` | Actividades ya realizadas donde organizaste o fuiste aceptado, con `role` y `count`. |

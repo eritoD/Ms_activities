@@ -166,3 +166,29 @@ def test_plan_usage_without_ms_pago_is_unknown():
     client, _, (me, *_) = make(None)
     body = client.get(f"{PREFIX}/plan-usage", headers=headers(me)).json()
     assert body["plan"] is None and all(item["limite"] is None for item in body["items"])
+
+
+def test_the_real_startup_connects_the_service_to_ms_pago(monkeypatch):
+    """Regresión: una fusión dejó el arranque sin crear el cliente de Ms-pago y los límites no se aplicaban."""
+    import app.main as main
+
+    class Repo:
+        def __init__(self, pool): pass
+        def migrate(self): pass
+        def purge_old_chats(self): pass
+
+    class Pool:
+        def close(self): pass
+
+    monkeypatch.setenv("JWT_SECRET", SECRET)
+    monkeypatch.setenv("ACTIVITIES_DATABASE_URL", "postgresql://unused")
+    monkeypatch.setenv("PAYMENTS_SERVICE_URL", "http://ms_pago:8005")
+    monkeypatch.setenv("INTERNAL_SERVICE_TOKEN", TOKEN)
+    monkeypatch.setenv("ACTIVITIES_CHAT_PURGE_ENABLED", "false")
+    monkeypatch.setattr(main, "create_pool", lambda url: Pool())
+    monkeypatch.setattr(main, "PostgresActivitiesRepository", Repo)
+    with TestClient(main.create_app()) as client:
+        assert isinstance(client.app.state.service.entitlements, EntitlementsClient)
+    monkeypatch.delenv("PAYMENTS_SERVICE_URL")
+    with TestClient(main.create_app()) as client:  # sin Ms-pago configurado: fail-open
+        assert client.app.state.service.entitlements is None
